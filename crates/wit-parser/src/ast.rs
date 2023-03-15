@@ -462,8 +462,13 @@ struct Stream<'a> {
 
 pub struct Value<'a> {
     docs: Docs<'a>,
-    name: Id<'a>,
+    name: ValueId<'a>,
     kind: ValueKind<'a>,
+}
+
+pub enum ValueId<'a> {
+    Wildcard(Span), // `*`
+    Id(Id<'a>),
 }
 
 struct Union<'a> {
@@ -550,7 +555,7 @@ impl<'a> InterfaceItem<'a> {
             Some((_span, Token::Union)) => {
                 TypeDef::parse_union(tokens, docs).map(InterfaceItem::TypeDef)
             }
-            Some((_span, Token::Id)) | Some((_span, Token::ExplicitId)) => {
+            Some((_span, Token::Star | Token::Id | Token::ExplicitId)) => {
                 Value::parse(tokens, docs).map(InterfaceItem::Value)
             }
             Some((_span, Token::Use)) => Use::parse(tokens).map(InterfaceItem::Use),
@@ -668,10 +673,21 @@ impl<'a> TypeDef<'a> {
 
 impl<'a> Value<'a> {
     fn parse(tokens: &mut Tokenizer<'a>, docs: Docs<'a>) -> Result<Self> {
-        let name = parse_id(tokens)?;
+        let name = parse_value_id(tokens)?;
         tokens.expect(Token::Colon)?;
         let kind = ValueKind::parse(tokens)?;
         Ok(Value { docs, name, kind })
+    }
+}
+
+fn parse_value_id<'a>(tokens: &mut Tokenizer<'a>) -> Result<ValueId<'a>> {
+    match tokens.clone().next()? {
+        Some((_span, Token::Id | Token::ExplicitId)) => parse_id(tokens).map(ValueId::Id),
+        Some((span, Token::Star)) => {
+            tokens.expect(Token::Star)?;
+            Ok(ValueId::Wildcard(span))
+        }
+        other => Err(err_expected(tokens, "an identifier or `*`", other).into()),
     }
 }
 

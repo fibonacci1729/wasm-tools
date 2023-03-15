@@ -1,4 +1,4 @@
-use super::{Error, ParamList, ResultList, ValueKind};
+use super::{Error, ParamList, ResultList, Value, ValueKind, ValueId};
 use crate::ast::toposort::toposort;
 use crate::*;
 use anyhow::{anyhow, bail, Result};
@@ -186,6 +186,7 @@ impl<'a> Resolver<'a> {
                                     docs: Docs::default(),
                                     document: doc,
                                     functions: IndexMap::new(),
+                                    wildcard: None,
                                 });
                                 DocumentItem::Interface(id)
                             });
@@ -205,6 +206,7 @@ impl<'a> Resolver<'a> {
                                 docs: Docs::default(),
                                 document: doc,
                                 functions: IndexMap::new(),
+                                wildcard: None,
                             })
                         }),
                 };
@@ -528,6 +530,7 @@ impl<'a> Resolver<'a> {
             name: name.map(|s| s.to_string()),
             functions: IndexMap::new(),
             types: IndexMap::new(),
+            wildcard: None,
         });
         if let Some(name) = name {
             self.document_interfaces[document.index()]
@@ -562,12 +565,29 @@ impl<'a> Resolver<'a> {
                     let docs = self.docs(&value.docs);
                     match &value.kind {
                         ValueKind::Func(func) => {
-                            self.define_interface_name(&value.name, TypeOrItem::Item("function"))?;
-                            let func = self.resolve_function(docs, value.name.name, func)?;
-                            let prev = self.interfaces[interface_id]
-                                .functions
-                                .insert(value.name.name.to_string(), func);
-                            assert!(prev.is_none());
+                            match &value.name {
+                                ValueId::Wildcard(span) => {
+                                    let func = self.resolve_function(docs, "", func)?;
+                                    let prev = self.interfaces[interface_id]
+                                        .wildcard
+                                        .replace(func);
+
+                                    if prev.is_some() {
+                                        return Err(Error {
+                                            span: *span,
+                                            msg: format!("an interface template must contain at most a single `*` field"),
+                                        }.into());
+                                    }
+                                },
+                                ValueId::Id(id) => {
+                                    self.define_interface_name(&id, TypeOrItem::Item("function"))?;
+                                    let func = self.resolve_function(docs, id.name, func)?;
+                                    let prev = self.interfaces[interface_id]
+                                        .functions
+                                        .insert(id.name.to_string(), func);
+                                    assert!(prev.is_none());
+                                },
+                            }
                         }
                     }
                 }

@@ -435,6 +435,10 @@ impl Resolve {
             }
         }
     }
+
+    pub fn expand_wildcards(&mut self, _world_id: WorldId, _substitutions: HashMap<String, HashSet<String>>) -> Result<()> {
+        todo!("expand-wildcards")
+    }
 }
 
 /// Structure returned by [`Resolve::merge`] which contains mappings from

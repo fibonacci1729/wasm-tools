@@ -2,6 +2,7 @@
 
 use crate::{
     config::Config,
+    document,
     encoding::CompositionGraphEncoder,
     graph::{
         Component, ComponentId, CompositionGraph, EncodeOptions, ExportIndex, ImportIndex,
@@ -42,7 +43,7 @@ struct Dependency {
 
 /// A composition graph builder that wires up instances from components
 /// resolved from the file system.
-struct CompositionGraphBuilder<'a> {
+pub struct CompositionGraphBuilder<'a> {
     /// The associated composition configuration.
     config: &'a Config,
     /// The graph being built.
@@ -52,15 +53,13 @@ struct CompositionGraphBuilder<'a> {
 }
 
 impl<'a> CompositionGraphBuilder<'a> {
-    fn new(root_path: &Path, config: &'a Config) -> Result<Self> {
-        let mut graph = CompositionGraph::new();
-        graph.add_component(Component::from_file(ROOT_COMPONENT_NAME, root_path)?)?;
-
-        Ok(Self {
+    /// Crates a new graph builder for a component graph.
+    pub fn new(config: &'a Config) -> Self {
+        Self {
             config,
-            graph,
+            graph: CompositionGraph::new(),
             instances: Default::default(),
-        })
+        }
     }
 
     /// Adds a component of the given name to the graph.
@@ -409,8 +408,9 @@ impl<'a> ComponentComposer<'a> {
     /// ## Returns
     /// Returns the bytes of the composed component.
     pub fn compose(&self) -> Result<Vec<u8>> {
-        let (root_instance, graph) =
-            CompositionGraphBuilder::new(self.component, self.config)?.build()?;
+        let graph_builder = document::build_graph(self.config, self.component)?;
+
+        let (root_instance, graph) = graph_builder.build()?;
 
         // If only the root component was instantiated, then there are no resolved dependencies
         if graph.instances.len() == 1 {

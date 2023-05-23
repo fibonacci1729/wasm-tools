@@ -16,10 +16,9 @@ pub struct WasmComposeCommand {
     #[clap(long, short = 'o', value_name = "OUTPUT")]
     pub output: PathBuf,
 
-    /// The path to the configuration file to use.
-    #[clap(long, short = 'c', value_name = "CONFIG")]
-    pub config: Option<PathBuf>,
-
+    // /// The path to the configuration file to use.
+    // #[clap(long, short = 'c', value_name = "CONFIG")]
+    // pub config: Option<PathBuf>,
     /// A path to search for imports.
     #[clap(long = "search-path", short = 'p', value_name = "PATH")]
     pub paths: Vec<PathBuf>,
@@ -79,20 +78,28 @@ impl WasmComposeCommand {
     }
 
     fn create_config(&self) -> Result<Config> {
-        let mut config = if let Some(config) = &self.config {
-            Config::from_file(config)?
-        } else {
-            // Pretend a default configuration file is sitting next to the component
-            Config {
-                dir: self
-                    .component
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default(),
-                ..Default::default()
-            }
-        };
+        // let mut config = if let Some(config) = &self.config {
+        //     Config::from_file(config)?
+        // } else {
+        //     // Pretend a default configuration file is sitting next to the component
+        //     Config {
+        //         dir: self
+        //             .component
+        //             .parent()
+        //             .map(Path::to_path_buf)
+        //             .unwrap_or_default(),
+        //         ..Default::default()
+        //     }
+        // };
 
+        let mut config = Config {
+            dir: self
+                .component
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            ..Default::default()
+        };
         config.search_paths.extend(self.paths.iter().cloned());
         config.skip_validation |= self.skip_validation;
         config.disallow_imports |= self.disallow_imports;

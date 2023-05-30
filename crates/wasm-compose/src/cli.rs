@@ -16,10 +16,6 @@ pub struct WasmComposeCommand {
     #[clap(long, short = 'o', value_name = "OUTPUT")]
     pub output: PathBuf,
 
-    /// The path to the configuration file to use.
-    #[clap(long, short = 'c', value_name = "CONFIG")]
-    pub config: Option<PathBuf>,
-
     /// A path to search for imports.
     #[clap(long = "search-path", short = 'p', value_name = "PATH")]
     pub paths: Vec<PathBuf>,
@@ -40,7 +36,17 @@ pub struct WasmComposeCommand {
 impl WasmComposeCommand {
     /// Executes the application.
     pub fn execute(self) -> Result<()> {
-        let config = self.create_config()?;
+        let config = Config {
+            search_paths: self.paths,
+            skip_validation: self.skip_validation,
+            disallow_imports: self.disallow_imports,
+            dir: self
+                .component
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            ..Default::default()
+        };
         log::debug!("configuration:\n{:#?}", config);
 
         let bytes = ComponentComposer::new(&self.component, &config).compose()?;
@@ -76,26 +82,5 @@ impl WasmComposeCommand {
         );
 
         Ok(())
-    }
-
-    fn create_config(&self) -> Result<Config> {
-        let mut config = if let Some(config) = &self.config {
-            Config::from_file(config)?
-        } else {
-            // Pretend a default configuration file is sitting next to the component
-            Config {
-                dir: self
-                    .component
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default(),
-                ..Default::default()
-            }
-        };
-
-        config.search_paths.extend(self.paths.iter().cloned());
-        config.skip_validation |= self.skip_validation;
-        config.disallow_imports |= self.disallow_imports;
-        Ok(config)
     }
 }

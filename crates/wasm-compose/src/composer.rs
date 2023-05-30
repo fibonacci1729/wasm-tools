@@ -2,6 +2,7 @@
 
 use crate::{
     config::Config,
+    document,
     encoding::CompositionGraphEncoder,
     graph::{
         Component, ComponentId, CompositionGraph, EncodeOptions, ExportIndex, ImportIndex,
@@ -42,25 +43,23 @@ struct Dependency {
 
 /// A composition graph builder that wires up instances from components
 /// resolved from the file system.
-struct CompositionGraphBuilder<'a> {
+pub(crate) struct CompositionGraphBuilder<'a> {
     /// The associated composition configuration.
-    config: &'a Config,
+    pub config: &'a Config,
     /// The graph being built.
-    graph: CompositionGraph<'a>,
+    pub graph: CompositionGraph<'a>,
     /// A map from instance name to graph instance id.
-    instances: IndexMap<String, InstanceId>,
+    pub instances: IndexMap<String, InstanceId>,
 }
 
 impl<'a> CompositionGraphBuilder<'a> {
-    fn new(root_path: &Path, config: &'a Config) -> Result<Self> {
+    fn new(config: &'a Config) -> Self {
         let mut graph = CompositionGraph::new();
-        graph.add_component(Component::from_file(ROOT_COMPONENT_NAME, root_path)?)?;
-
-        Ok(Self {
+        Self {
             config,
             graph,
             instances: Default::default(),
-        })
+        }
     }
 
     /// Adds a component of the given name to the graph.
@@ -356,7 +355,7 @@ impl<'a> CompositionGraphBuilder<'a> {
     }
 
     /// Build the instantiation graph.
-    fn build(mut self) -> Result<(InstanceId, CompositionGraph<'a>)> {
+    pub fn build(mut self) -> Result<(InstanceId, CompositionGraph<'a>)> {
         let mut queue: VecDeque<Dependency> = VecDeque::new();
 
         // Instantiate the root and push its dependencies to the queue
@@ -409,8 +408,9 @@ impl<'a> ComponentComposer<'a> {
     /// ## Returns
     /// Returns the bytes of the composed component.
     pub fn compose(&self) -> Result<Vec<u8>> {
-        let (root_instance, graph) =
-            CompositionGraphBuilder::new(self.component, self.config)?.build()?;
+        let graph_builder = CompositionGraphBuilder::new(self.config);
+
+        let (root_instance, graph) = document::build_graph(graph_builder, self.component)?;
 
         // If only the root component was instantiated, then there are no resolved dependencies
         if graph.instances.len() == 1 {

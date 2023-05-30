@@ -1,7 +1,10 @@
-use super::{error, token::{Span, Token, Tokenizer}};
+use super::{
+    error,
+    token::{Span, Token, Tokenizer},
+};
 use anyhow::Result;
-use std::{borrow::Cow, fmt};
 use semver::Version;
+use std::{borrow::Cow, fmt};
 
 /// Composition document AST.
 #[derive(Debug)]
@@ -27,8 +30,8 @@ impl<'i> Ast<'i> {
             match item {
                 Item::Import(Import { name, kind, .. }) => {
                     f(name, kind)?;
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -42,8 +45,8 @@ impl<'i> Ast<'i> {
             match item {
                 Item::Export(Export { expr, as_, .. }) => {
                     f(expr, as_.as_ref())?;
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -57,14 +60,12 @@ impl<'i> Ast<'i> {
             match item {
                 Item::Let(Let { var, expr, .. }) => {
                     f(var, expr)?;
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
         Ok(())
     }
-
-
 }
 
 #[derive(Debug)]
@@ -238,15 +239,15 @@ impl fmt::Debug for Arg<'_> {
 impl<'i> Arg<'i> {
     fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Arg<'i>> {
         let name = Name::parse(tokens)?;
-        
-       let with =  match tokens.clone().next()? {
+
+        let with = match tokens.clone().next()? {
             Some((_span, Token::Comma | Token::RightBrace)) => None,
             Some((_span, Token::Colon)) => {
                 tokens.expect(Token::Colon)?;
                 Name::parse(tokens).map(Option::Some)?
             }
             other => {
-                return Err(error::expected(tokens,  "argument", other).into());
+                return Err(error::expected(tokens, "argument", other).into());
             }
         };
 
@@ -292,7 +293,7 @@ impl<'i> Id<'i> {
         let package = Name::parse(tokens)?;
         tokens.expect(Token::Slash)?;
         let element = Name::parse(tokens)?;
-        let version = None;//parse_opt_version(tokens)?;
+        let version = None; //parse_opt_version(tokens)?;
         Ok(Id {
             namespace,
             package,
@@ -305,7 +306,7 @@ impl<'i> Id<'i> {
         wit_parser::PackageName {
             namespace: self.namespace.name.to_string(),
             name: self.package.name.to_string(),
-            version: None,//self.version.map(|(_, major, minor)| (major, minor)),
+            version: None, //self.version.map(|(_, major, minor)| (major, minor)),
         }
     }
 }

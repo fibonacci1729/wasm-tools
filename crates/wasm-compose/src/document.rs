@@ -1,22 +1,22 @@
-use crate::{composer::CompositionGraphBuilder, graph::{Component, InstanceId, ComponentId, CompositionGraph}};
+use crate::{
+    composer::CompositionGraphBuilder,
+    graph::{Component, ComponentId, CompositionGraph, InstanceId},
+};
 use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
-use self::{
-    parse::Ast,
-    token::Tokenizer,
-};
+use self::{parse::Ast, token::Tokenizer};
 
 mod error;
 mod parse;
 mod token;
 
-
-
-pub(crate) fn build_graph<'a>(mut builder: CompositionGraphBuilder<'a>, path: &'a Path) -> Result<(InstanceId, CompositionGraph<'a>)> {
-    let source = fs::read_to_string(path).with_context(|| format!("failed to read: {}", path.display()))?;
-
-    let parent = path.parent().unwrap();
+pub(crate) fn build_graph<'a>(
+    mut builder: CompositionGraphBuilder<'a>,
+    path: &'a Path,
+) -> Result<(InstanceId, CompositionGraph<'a>)> {
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read: {}", path.display()))?;
 
     let filename = path
         .file_name()
@@ -34,7 +34,7 @@ pub(crate) fn build_graph<'a>(mut builder: CompositionGraphBuilder<'a>, path: &'
         Ok(ast) => ast,
         Err(mut err) => {
             let file = path.display().to_string();
-            error::rewrite(&mut err, &file, &source);
+            error::rewrite(&mut err, &filename, &source);
             return Err(err);
         }
     };

@@ -1,45 +1,28 @@
-use crate::{
-    composer::CompositionGraphBuilder,
-    graph::{Component, ComponentId, CompositionGraph, InstanceId},
-};
-use anyhow::{Context, Result};
-use std::{fs, path::Path};
+//! Module for WebAssembly composition documents.
 
-use self::{parse::Ast, token::Tokenizer};
+use anyhow::Result;
+use std::path::Path;
+
+pub use self::parse::Ast;
 
 mod error;
 mod parse;
 mod token;
 
-pub(crate) fn build_graph<'a>(
-    mut builder: CompositionGraphBuilder<'a>,
-    path: &'a Path,
-) -> Result<(InstanceId, CompositionGraph<'a>)> {
-    let source =
-        fs::read_to_string(path).with_context(|| format!("failed to read: {}", path.display()))?;
+/// Parse an composition document into its AST.
+pub fn parse<'i>(path: impl AsRef<Path>, source: &'i str) -> Result<Ast<'i>> {
+    let mut tokens = token::Tokenizer::new(&source, 0)?;
 
-    let filename = path
-        .file_name()
-        .context("wld path must end in a file name")?
-        .to_str()
-        .context("wld filename must be valid unicode")?
-        // TODO: replace with `file_prefix` if/when that gets stabilized.
-        .split(".")
-        .next()
-        .unwrap();
-
-    let mut tokens = Tokenizer::new(&source, 0)?;
+    let path = path.as_ref();
 
     let ast = match Ast::parse(&mut tokens) {
         Ok(ast) => ast,
         Err(mut err) => {
             let file = path.display().to_string();
-            error::rewrite(&mut err, &filename, &source);
+            error::rewrite(&mut err, &file, &source);
             return Err(err);
         }
     };
 
-    todo!("resolve document");
-
-    builder.build()
+    Ok(ast)
 }

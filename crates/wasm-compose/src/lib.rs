@@ -6,6 +6,6 @@
 pub mod cli;
 pub mod composer;
 pub mod config;
-pub(crate) mod document;
+pub mod document;
 pub(crate) mod encoding;
 pub mod graph;

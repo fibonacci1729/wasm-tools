@@ -1,9 +1,14 @@
+//! Module for WebAssembly composition document errors.
+
 use super::token::{self, Span, Token, Tokenizer};
 use std::fmt;
 
+/// A syntax error
 #[derive(Debug)]
 pub struct Error {
+    /// Span of the error
     pub span: Span,
+    /// The error message
     pub msg: String,
 }
 

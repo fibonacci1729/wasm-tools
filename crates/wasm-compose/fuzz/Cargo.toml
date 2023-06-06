@@ -1,0 +1,22 @@
+[package]
+name = "wasm-compose-fuzz"
+version = "0.0.1"
+publish = false
+edition.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ['derive'] }
+env_logger = { workspace = true }
+libfuzzer-sys = { workspace = true }
+log = { workspace = true }
+wasmprinter = { workspace = true }
+wasm-compose = { workspace = true }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false

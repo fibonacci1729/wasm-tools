@@ -66,7 +66,7 @@ impl<'a> CompositionGraphBuilder<'a> {
     ///
     /// If a component with the given name already exists, its id is returned.
     /// Returns `Ok(None)` if a matching component cannot be found.
-    fn add_component(&mut self, name: &str) -> Result<Option<ComponentId>> {
+    pub(crate) fn add_component(&mut self, name: &str) -> Result<Option<ComponentId>> {
         if let Some((id, _)) = self.graph.get_component_by_name(name) {
             return Ok(Some(id));
         }
@@ -408,26 +408,27 @@ impl<'a> ComponentComposer<'a> {
     /// ## Returns
     /// Returns the bytes of the composed component.
     pub fn compose(&self) -> Result<Vec<u8>> {
-        let graph_builder = CompositionGraphBuilder::new(self.config);
+        // let graph_builder = CompositionGraphBuilder::new(self.config);
 
-        let (root_instance, graph) = document::build_graph(graph_builder, self.component)?;
+        // let (root_instance, graph) = document::build_graph(graph_builder, self.component)?;
 
-        // If only the root component was instantiated, then there are no resolved dependencies
-        if graph.instances.len() == 1 {
-            bail!(
-                "no dependencies of component `{path}` were found",
-                path = self.component.display()
-            );
-        }
+        // // If only the root component was instantiated, then there are no resolved dependencies
+        // if graph.instances.len() == 1 {
+        //     bail!(
+        //         "no dependencies of component `{path}` were found",
+        //         path = self.component.display()
+        //     );
+        // }
 
-        CompositionGraphEncoder::new(
-            EncodeOptions {
-                define_components: !self.config.import_components,
-                export: Some(root_instance),
-                validate: false,
-            },
-            &graph,
-        )
-        .encode()
+        // CompositionGraphEncoder::new(
+        //     EncodeOptions {
+        //         define_components: !self.config.import_components,
+        //         export: Some(root_instance),
+        //         validate: false,
+        //     },
+        //     &graph,
+        // )
+        // .encode()
+        todo!("compose")
     }
 }

@@ -4,16 +4,16 @@ use super::{
 };
 use anyhow::Result;
 use semver::Version;
-use std::{borrow::Cow, fmt};
+use std::borrow::Cow;
 
 /// Composition document AST.
-#[derive(Debug)]
 pub struct Ast<'i> {
-    pub items: Vec<Item<'i>>,
+    items: Vec<Item<'i>>,
 }
 
 impl<'i> Ast<'i> {
-    pub fn parse(tokens: &mut Tokenizer<'i>) -> Result<Ast<'i>> {
+    /// Parse a composition document.
+    pub(super) fn parse(tokens: &mut Tokenizer<'i>) -> Result<Ast<'i>> {
         let mut items = Vec::new();
         while tokens.clone().next()?.is_some() {
             let docs = Docs::parse(tokens)?;
@@ -22,71 +22,84 @@ impl<'i> Ast<'i> {
         Ok(Self { items })
     }
 
-    pub fn for_each_import<'b>(
-        &'b self,
-        mut f: impl FnMut(&'b Name<'i>, &'b ImportKind<'i>) -> Result<()>,
-    ) -> Result<()> {
-        for item in self.items.iter() {
-            match item {
-                Item::Import(Import { name, kind, .. }) => {
-                    f(name, kind)?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
+    // fn for_each_import<'b>(
+    //     &'b self,
+    //     mut f: impl FnMut(&'b Import<'i>) -> Result<()>,
+    // ) -> Result<()> {
+    //     for item in self.items.iter() {
+    //         match item {
+    //             Item::Import(item) => {
+    //                 f(item)?;
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
-    pub fn for_each_export<'b>(
-        &'b self,
-        mut f: impl FnMut(&'b Expr<'i>, Option<&'b Id<'i>>) -> Result<()>,
-    ) -> Result<()> {
-        for item in self.items.iter() {
-            match item {
-                Item::Export(Export { expr, as_, .. }) => {
-                    f(expr, as_.as_ref())?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
+    // fn for_each_export<'b>(
+    //     &'b self,
+    //     mut f: impl FnMut(&'b Export<'i>) -> Result<()>,
+    // ) -> Result<()> {
+    //     for item in self.items.iter() {
+    //         match item {
+    //             Item::Export(item) => {
+    //                 f(item)?;
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
-    pub fn for_each_instantiation<'b>(
-        &'b self,
-        mut f: impl FnMut(&'b Name<'i>, &'b Expr<'i>) -> Result<()>,
-    ) -> Result<()> {
-        for item in self.items.iter() {
-            match item {
-                Item::Let(Let { var, expr, .. }) => {
-                    f(var, expr)?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
+    // fn for_each_use<'b>(
+    //     &'b self,
+    //     mut f: impl FnMut(&'b Use<'i>) -> Result<()>,
+    // ) -> Result<()> {
+    //     for item in self.items.iter() {
+    //         match item {
+    //             Item::Use(item) => {
+    //                 f(item)?;
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+    //     Ok(())
+    // }
+
+    // fn for_each_let<'b>(
+    //     &'b self,
+    //     mut f: impl FnMut(&'b Let<'i>) -> Result<()>,
+    // ) -> Result<()> {
+    //     for item in self.items.iter() {
+    //         match item {
+    //             Item::Let(item) => {
+    //                 f(item)?;
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+    //     Ok(())
+    // }
 }
 
-#[derive(Debug)]
-pub enum Item<'i> {
+enum Item<'i> {
     Import(Import<'i>),
     Export(Export<'i>),
+    Use(Use<'i>),
     Let(Let<'i>),
 }
 
 impl<'i> Item<'i> {
-    pub fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Item<'i>> {
+    fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Item<'i>> {
         match tokens.clone().next()? {
-            Some((_span, Token::Component)) => {
-                Import::parse_component(tokens, docs).map(Item::Import)
-            }
-            Some((_span, Token::Import)) => Import::parse_interface(tokens, docs).map(Item::Import),
+            Some((_span, Token::Import)) => Import::parse(tokens, docs).map(Item::Import),
             Some((_span, Token::Export)) => Export::parse(tokens, docs).map(Item::Export),
+            Some((_span, Token::Use)) => Use::parse(tokens, docs).map(Item::Use),
             Some((_span, Token::Let)) => Let::parse(tokens, docs).map(Item::Let),
             other => {
                 Err(
-                    error::expected(tokens, "`component`, `import`, `export` or `let`", other)
+                    error::expected(tokens, "`import`, `export`, `use` or `let`", other)
                         .into(),
                 )
             }
@@ -94,129 +107,127 @@ impl<'i> Item<'i> {
     }
 }
 
-pub struct Import<'i> {
-    pub docs: Docs<'i>,
-    pub name: Name<'i>,
-    pub kind: ImportKind<'i>,
-}
-
-impl fmt::Debug for Import<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Import")
-            .field("name", &self.name)
-            .field("kind", &self.kind)
-            .finish()
-    }
-}
-
-#[derive(Debug)]
-pub enum ImportKind<'i> {
-    Component(Option<Id<'i>>),
-    Interface(Id<'i>),
+struct Import<'i> {
+    docs: Docs<'i>,
+    name: Name<'i>,
+    id: Id<'i>,
 }
 
 impl<'i> Import<'i> {
-    fn parse_component(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Import<'i>> {
-        tokens.expect(Token::Component)?;
-        let name = Name::parse(tokens)?;
-        let mut id = None;
-        if tokens.eat(Token::Colon)? {
-            id = Id::parse(tokens).map(Option::Some)?
-        }
-        Ok(Import {
-            docs,
-            name,
-            kind: ImportKind::Component(id),
-        })
-    }
-
-    fn parse_interface(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Import<'i>> {
+    fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Import<'i>> {
         tokens.expect(Token::Import)?;
         let name = Name::parse(tokens)?;
         tokens.expect(Token::Colon)?;
         let id = Id::parse(tokens)?;
-        Ok(Import {
-            docs,
-            name,
-            kind: ImportKind::Interface(id),
-        })
+        Ok(Import { docs, name, id })
     }
 }
 
-pub struct Export<'i> {
-    pub docs: Docs<'i>,
-    pub expr: Expr<'i>,
-    pub as_: Option<Id<'i>>,
+struct Use<'i> {
+    docs: Docs<'i>,
+    pkg: PackageName<'i>,
+    as_: Option<Name<'i>>,
 }
 
-impl fmt::Debug for Export<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Export")
-            .field("expr", &self.expr)
-            .field("as", &self.as_)
-            .finish()
+impl<'i> Use<'i> {
+    fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Use<'i>> {
+        tokens.expect(Token::Use)?;
+        let pkg = PackageName::parse(tokens)?;
+        let mut as_ = None;
+        if tokens.eat(Token::As)? {
+            as_ = Name::parse(tokens).map(Option::Some)?;
+        }
+        Ok(Use { docs, pkg, as_ })
     }
+}
+
+struct Export<'i> {
+    docs: Docs<'i>,
+    path: Path<'i>,
+    as_: Option<NameOrId<'i>>,
 }
 
 impl<'i> Export<'i> {
     fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Export<'i>> {
         tokens.expect(Token::Export)?;
-        let expr = Expr::parse(tokens)?;
+        let path = Path::parse(tokens)?;
         let mut as_ = None;
         if tokens.eat(Token::As)? {
-            as_ = Id::parse(tokens).map(Option::Some)?;
+            as_ = NameOrId::parse(tokens).map(Option::Some)?;
         }
-        Ok(Export { docs, expr, as_ })
+        Ok(Export { docs, path, as_ })
     }
 }
 
-pub struct Let<'i> {
-    pub docs: Docs<'i>,
-    pub var: Name<'i>,
-    pub expr: Expr<'i>,
-}
-
-impl fmt::Debug for Let<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Let")
-            .field("var", &self.var)
-            .field("expr", &self.expr)
-            .finish()
-    }
+struct Let<'i> {
+    docs: Docs<'i>,
+    name: Name<'i>,
+    expr: Expr<'i>,
 }
 
 impl<'i> Let<'i> {
     fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Let<'i>> {
         tokens.expect(Token::Let)?;
-        let var = Name::parse(tokens)?;
+        let name = Name::parse(tokens)?;
         tokens.expect(Token::Equals)?;
-        tokens.expect(Token::New)?;
         let expr = Expr::parse(tokens)?;
-        Ok(Let { docs, var, expr })
+        Ok(Let { docs, name, expr })
     }
 }
 
-// let foobar = new local:foobar/
-#[derive(Debug)]
-pub struct Expr<'i> {
-    pub name: Name<'i>,
-    pub args: Option<Args<'i>>,
+enum Expr<'i> {
+    Alias(Path<'i>),
+    New {
+        name: Name<'i>,
+        args: Option<Args<'i>>,
+    },
 }
 
 impl<'i> Expr<'i> {
-    pub fn parse(tokens: &mut Tokenizer<'i>) -> Result<Expr<'i>> {
+    fn parse(tokens: &mut Tokenizer<'i>) -> Result<Expr<'i>> {
+        if tokens.eat(Token::New)? {
+            Expr::parse_new(tokens)
+        } else {
+            Expr::parse_alias(tokens)
+        }
+    }
+
+    fn parse_new(tokens: &mut Tokenizer<'i>) -> Result<Expr<'i>> {
         let name = Name::parse(tokens)?;
         let args = if tokens.eat(Token::LeftBrace)? {
             Args::parse(tokens).map(Option::Some)?
         } else {
             None
         };
-        Ok(Expr { name, args })
+        Ok(Expr::New { name, args })
+    }
+
+    fn parse_alias(tokens: &mut Tokenizer<'i>) -> Result<Expr<'i>> {
+        Path::parse(tokens).map(Expr::Alias)
     }
 }
 
-#[derive(Debug)]
-pub struct Args<'i>(pub Vec<Arg<'i>>);
+/// A path expression
+struct Path<'i> {
+    from: Name<'i>,
+    elems: Vec<NameOrId<'i>>,
+}
+
+impl<'i> Path<'i> {
+    fn parse(tokens: &mut Tokenizer<'i>) -> Result<Path<'i>> {
+        let from = Name::parse(tokens)?;
+        let mut elems = Vec::new();
+        while tokens.eat(Token::LeftBracket)? {
+            let elem = NameOrId::parse(tokens)?;
+            tokens.expect(Token::RightBracket)?;
+            elems.push(elem);
+        }
+        Ok(Path { from, elems })
+    }
+}
+
+/// Instantiation arguments
+struct Args<'i>(pub Vec<Arg<'i>>);
 
 impl<'i> Args<'i> {
     fn parse(tokens: &mut Tokenizer<'i>) -> Result<Args<'i>> {
@@ -224,66 +235,92 @@ impl<'i> Args<'i> {
     }
 }
 
-pub struct Arg<'i> {
-    pub docs: Docs<'i>,
-    pub name: Name<'i>,
-    pub with: Option<Name<'i>>,
-}
-
-impl fmt::Debug for Arg<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self.name)
-    }
+/// An instantiation argument
+struct Arg<'i> {
+    docs: Docs<'i>,
+    name: Option<Name<'i>>,
+    expr: Expr<'i>,
 }
 
 impl<'i> Arg<'i> {
     fn parse(tokens: &mut Tokenizer<'i>, docs: Docs<'i>) -> Result<Arg<'i>> {
+        let mut clone = tokens.clone();
+        match clone.next()? {
+            Some((_span, Token::Id)) => {
+                if clone.eat(Token::Equals)? { 
+                    // name `=` expr
+                    let name = Name::parse(tokens).map(Option::Some)?;
+                    tokens.expect(Token::Equals)?;
+                    let expr = Expr::parse(tokens)?;
+                    Ok(Arg {
+                        docs,
+                        name,
+                        expr,
+                    })
+                } else {
+                    // ... otherwise must be alias expression
+                    Ok(Arg {
+                        docs,
+                        name: None,
+                        expr: Expr::parse_alias(tokens)?,
+                    })
+                }
+            }
+            Some((_span, Token::New)) => {
+                Ok(Arg {
+                    docs,
+                    name: None,
+                    expr: Expr::parse_new(tokens)?,
+                })
+            }
+            other => Err(error::expected(tokens, "argument name or expression", other).into())
+        }
+    }
+}
+
+/// A package name
+#[derive(Debug, Clone)]
+struct PackageName<'i> {
+    span: Span,
+    namespace: Name<'i>,
+    name: Name<'i>,
+    version: Option<(Span, Version)>,
+}
+
+impl<'i> PackageName<'i> {
+    fn parse(tokens: &mut Tokenizer<'i>) -> Result<Self> {
+        let namespace = Name::parse(tokens)?;
+        tokens.expect(Token::Colon)?;
         let name = Name::parse(tokens)?;
-
-        let with = match tokens.clone().next()? {
-            Some((_span, Token::Comma | Token::RightBrace)) => None,
-            Some((_span, Token::Colon)) => {
-                tokens.expect(Token::Colon)?;
-                Name::parse(tokens).map(Option::Some)?
-            }
-            other => {
-                return Err(error::expected(tokens, "argument", other).into());
-            }
-        };
-
-        Ok(Arg { docs, name, with })
-    }
-}
-
-// e.g. foo:bar/baz@1.0
-pub struct Id<'i> {
-    pub namespace: Name<'i>,
-    pub package: Name<'i>,
-    pub element: Name<'i>,
-    pub version: Option<(Span, Version)>,
-}
-
-impl fmt::Debug for Id<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let Id {
+        let version = parse_opt_version(tokens)?;
+        Ok(PackageName {
+            span: Span {
+                start: namespace.span.start,
+                end: version
+                    .as_ref()
+                    .map(|(s, _)| s.end)
+                    .unwrap_or(name.span.end),
+            },
             namespace,
-            package,
-            element,
-            version: _,
-        } = self;
-
-        write!(
-            f,
-            "{namespace}:{package}/{element}",
-            namespace = namespace.name,
-            package = package.name,
-            element = element.name,
-        )?;
-        // if let Some((_, major, minor)) = version {
-        //     write!(f, "@{major}.{minor}")?;
-        // }
-        Ok(())
+            name,
+            version,
+        })
     }
+
+    fn wit_package_name(&self) -> wit_parser::PackageName {
+        wit_parser::PackageName {
+            namespace: self.namespace.name.to_string(),
+            name: self.name.name.to_string(),
+            version: self.version.as_ref().map(|(_, v)| v.clone()),
+        }
+    }
+}
+
+/// e.g. foo:bar/baz@1.0
+#[derive(Debug, Clone)]
+pub struct Id<'i> {
+    package: PackageName<'i>,
+    element: Name<'i>,
 }
 
 impl<'i> Id<'i> {
@@ -293,28 +330,47 @@ impl<'i> Id<'i> {
         let package = Name::parse(tokens)?;
         tokens.expect(Token::Slash)?;
         let element = Name::parse(tokens)?;
-        let version = None; //parse_opt_version(tokens)?;
+        let version = parse_opt_version(tokens)?;
         Ok(Id {
-            namespace,
-            package,
+            package: PackageName {
+                span: Span {
+                    start: namespace.span.start,
+                    end: package.span.end,
+                },
+                namespace,
+                name: package,
+                version,
+            },
             element,
-            version,
         })
     }
+}
 
-    pub fn as_wit_package_name(&self) -> wit_parser::PackageName {
-        wit_parser::PackageName {
-            namespace: self.namespace.name.to_string(),
-            name: self.package.name.to_string(),
-            version: None, //self.version.map(|(_, major, minor)| (major, minor)),
+enum NameOrId<'i> {
+    Id(Id<'i>),
+    Name(Name<'i>),
+}
+
+impl<'i> NameOrId<'i> {
+    fn parse(tokens: &mut Tokenizer<'i>) -> Result<Self> {
+        let mut clone = tokens.clone();
+        let first = Name::parse(tokens)?;
+        if tokens.eat(Token::Colon)? {
+            // We're looking at an Id, parse as such
+            let id = Id::parse(&mut clone).map(NameOrId::Id)?;
+            *tokens = clone;
+            Ok(id)
+        } else {
+            Ok(NameOrId::Name(first))
         }
     }
 }
 
-#[derive(Clone)]
-pub struct Name<'i> {
-    pub name: &'i str,
-    pub span: Span,
+/// Name is a kebab-case identifier, e.g. foo-bar.
+#[derive(Debug, Clone)]
+struct Name<'i> {
+    name: &'i str,
+    span: Span,
 }
 
 impl<'i> From<&'i str> for Name<'i> {
@@ -323,18 +379,6 @@ impl<'i> From<&'i str> for Name<'i> {
             name: s.into(),
             span: Span { start: 0, end: 0 },
         }
-    }
-}
-
-impl fmt::Debug for Name<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct(&format!(
-            "{name}@{pos}..{end}",
-            name = self.name,
-            pos = self.span.start,
-            end = self.span.end,
-        ))
-        .finish()
     }
 }
 
@@ -354,7 +398,7 @@ impl<'i> Name<'i> {
 }
 
 #[derive(Default)]
-pub struct Docs<'i> {
+struct Docs<'i> {
     docs: Vec<Cow<'i, str>>,
 }
 
@@ -373,21 +417,6 @@ impl<'i> Docs<'i> {
         Ok(docs)
     }
 }
-
-// fn parse_opt_version(tokens: &mut Tokenizer<'_>) -> Result<Option<(Span, u32, u32)>> {
-//     Ok(if tokens.eat(Token::At)? {
-//         let major = tokens.expect(Token::Integer)?;
-//         tokens.expect(Token::Period)?;
-//         let minor = tokens.expect(Token::Integer)?;
-//         let span = Span {
-//             start: major.start,
-//             end: minor.end,
-//         };
-//         Some((span, tokens.parse_u32(major)?, tokens.parse_u32(minor)?))
-//     } else {
-//         None
-//     })
-// }
 
 fn parse_list_trailer<'a, T>(
     tokens: &mut Tokenizer<'a>,
@@ -415,4 +444,54 @@ fn parse_list_trailer<'a, T>(
         }
     }
     Ok(items)
+}
+
+fn parse_opt_version(tokens: &mut Tokenizer<'_>) -> Result<Option<(Span, Version)>> {
+    if !tokens.eat(Token::At)? {
+        return Ok(None);
+    }
+    let start = tokens.expect(Token::Integer)?.start;
+    tokens.expect(Token::Period)?;
+    tokens.expect(Token::Integer)?;
+    tokens.expect(Token::Period)?;
+    let end = tokens.expect(Token::Integer)?.end;
+    let mut span = Span { start, end };
+    eat_ids(tokens, Token::Minus, &mut span)?;
+    eat_ids(tokens, Token::Plus, &mut span)?;
+    let string = tokens.get_span(span);
+    let version = Version::parse(string).map_err(|e| error::Error {
+        span,
+        msg: e.to_string(),
+    })?;
+    return Ok(Some((span, version)));
+
+    fn eat_ids(tokens: &mut Tokenizer<'_>, prefix: Token, end: &mut Span) -> Result<()> {
+        if !tokens.eat(prefix)? {
+            return Ok(());
+        }
+        loop {
+            match tokens.next()? {
+                Some((span, Token::Id)) | Some((span, Token::Integer)) => end.end = span.end,
+                other => break Err(error::expected(tokens, "an id or integer", other).into()),
+            }
+
+            // If there's no trailing period, then this semver identifier is
+            // done.
+            let mut clone = tokens.clone();
+            if !clone.eat(Token::Period)? {
+                break Ok(());
+            }
+
+            // If there's more to the identifier, then eat the period for real
+            // and continue
+            if clone.eat(Token::Id)? || clone.eat(Token::Integer)? {
+                tokens.eat(Token::Period)?;
+                continue;
+            }
+
+            // Otherwise for something like `use foo:bar/baz@1.2.3+foo.{` stop
+            // the parsing here.
+            break Ok(());
+        }
+    }
 }

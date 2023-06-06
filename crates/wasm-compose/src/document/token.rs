@@ -35,11 +35,15 @@ pub enum Token {
 
     Equals,
     Slash,
+    Plus,
+    Minus,
     At,
     Comma,
     Colon,
     Period,
     Semicolon,
+    LeftBracket,
+    RightBracket,
     LeftBrace,
     RightBrace,
 
@@ -48,6 +52,7 @@ pub enum Token {
     Export,
     Let,
     New,
+    Use,
     As,
 
     Id,
@@ -162,12 +167,16 @@ impl<'a> Tokenizer<'a> {
                     Slash
                 }
             }
+            '+' => Plus,
+            '-' => Minus,
             '@' => At,
             '=' => Equals,
             ',' => Comma,
             ':' => Colon,
             '.' => Period,
             ';' => Semicolon,
+            '[' => LeftBracket,
+            ']' => RightBracket,
             '{' => LeftBrace,
             '}' => RightBrace,
             ch if is_keylike_start(ch) => {
@@ -187,6 +196,7 @@ impl<'a> Tokenizer<'a> {
                     "export" => Export,
                     "let" => Let,
                     "new" => New,
+                    "use" => Use,
                     "as" => As,
                     _ => Id,
                 }
@@ -384,11 +394,15 @@ impl Token {
             Comment => "a comment",
             Equals => "`=`",
             Slash => "`/`",
+            Plus => "`+`",
+            Minus => "`-`",
             At => "`@`",
             Comma => "`,`",
             Colon => "`:`",
             Period => "`.`",
             Semicolon => "`;`",
+            LeftBracket => "`[`",
+            RightBracket => "`]`",
             LeftBrace => "`{`",
             RightBrace => "`}`",
             Component => "keyword `component`",
@@ -396,6 +410,7 @@ impl Token {
             Export => "keyword `export`",
             Let => "keyword `let`",
             New => "keyword `new`",
+            Use => "keyword `use`",
             As => "keyword `as`",
             Id => "an identifier",
             Integer => "an integer",

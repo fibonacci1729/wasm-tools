@@ -20,6 +20,20 @@ pub struct Ast<'a> {
     items: Vec<AstItem<'a>>,
 }
 
+enum PathItem<'a, 'b> {
+    // A world or interface
+    Item {
+        name: Option<&'b Id<'a>>,
+        path: &'b UsePath<'a>,
+        uses: Option<&'b [UseName<'a>]>,
+        kind: WorldOrInterface,
+    },
+    // A Component
+    Impl {
+        id: &'b PackageName<'a>,
+    },
+}
+
 impl<'a> Ast<'a> {
     pub fn parse(lexer: &mut Tokenizer<'a>) -> Result<Self> {
         let mut items = Vec::new();
@@ -36,12 +50,7 @@ impl<'a> Ast<'a> {
 
     fn for_each_path<'b>(
         &'b self,
-        mut f: impl FnMut(
-            Option<&'b Id<'a>>,
-            &'b UsePath<'a>,
-            Option<&'b [UseName<'a>]>,
-            WorldOrInterface,
-        ) -> Result<()>,
+        mut f: impl FnMut(PathItem<'a, 'b>) -> Result<()>,
     ) -> Result<()> {
         for item in self.items.iter() {
             match item {
@@ -54,12 +63,18 @@ impl<'a> Ast<'a> {
                     let mut exports = Vec::new();
                     for item in world.items.iter() {
                         match item {
-                            WorldItem::Use(u) => {
-                                f(None, &u.from, Some(&u.names), WorldOrInterface::Interface)?
-                            }
-                            WorldItem::Include(i) => {
-                                f(Some(&world.name), &i.from, None, WorldOrInterface::World)?
-                            }
+                            WorldItem::Use(u) => f(PathItem::Item {
+                                name: None,
+                                path: &u.from,
+                                uses: Some(&u.names),
+                                kind: WorldOrInterface::Interface,
+                            })?,
+                            WorldItem::Include(i) => f(PathItem::Item {
+                                name: Some(&world.name),
+                                path: &i.from,
+                                uses: None,
+                                kind: WorldOrInterface::World,
+                            })?,
                             WorldItem::Type(_) => {}
                             WorldItem::Import(Import { kind, .. }) => imports.push(kind),
                             WorldItem::Export(Export { kind, .. }) => exports.push(kind),
@@ -70,18 +85,23 @@ impl<'a> Ast<'a> {
                         ExternKind::Interface(_, items) => {
                             for item in items {
                                 match item {
-                                    InterfaceItem::Use(u) => f(
-                                        None,
-                                        &u.from,
-                                        Some(&u.names),
-                                        WorldOrInterface::Interface,
-                                    )?,
+                                    InterfaceItem::Use(u) => f(PathItem::Item {
+                                        name: None,
+                                        path: &u.from,
+                                        uses: Some(&u.names),
+                                        kind: WorldOrInterface::Interface,
+                                    })?,
                                     _ => {}
                                 }
                             }
                             Ok(())
                         }
-                        ExternKind::Path(path) => f(None, path, None, WorldOrInterface::Interface),
+                        ExternKind::Path(path) => f(PathItem::Item {
+                            name: None,
+                            path,
+                            uses: None,
+                            kind: WorldOrInterface::Interface,
+                        }),
                         ExternKind::Func(..) => Ok(()),
                     };
 
@@ -95,12 +115,12 @@ impl<'a> Ast<'a> {
                 AstItem::Interface(i) => {
                     for item in i.items.iter() {
                         match item {
-                            InterfaceItem::Use(u) => f(
-                                Some(&i.name),
-                                &u.from,
-                                Some(&u.names),
-                                WorldOrInterface::Interface,
-                            )?,
+                            InterfaceItem::Use(u) => f(PathItem::Item {
+                                name: Some(&i.name),
+                                path: &u.from,
+                                uses: Some(&u.names),
+                                kind: WorldOrInterface::Interface,
+                            })?,
                             _ => {}
                         }
                     }
@@ -108,7 +128,56 @@ impl<'a> Ast<'a> {
                 AstItem::Use(u) => {
                     // At the top-level, we don't know if this is a world or an interface
                     // It is up to the resolver to decides how to handle this ambiguity.
-                    f(None, &u.item, None, WorldOrInterface::Unknown)?;
+                    f(PathItem::Item {
+                        name: None,
+                        path: &u.item,
+                        uses: None,
+                        kind: WorldOrInterface::Unknown,
+                    })?;
+                }
+                AstItem::Component(c) => {
+                    let mut imports = Vec::new();
+                    for item in c.items.iter() {
+                        match item {
+                            ComponentItem::Use { package, .. } => {
+                                f(PathItem::Impl { id: package })?;
+                            }
+                            ComponentItem::Import(ComponentImport { kind, .. }) => {
+                                imports.push(kind)
+                            }
+                            ComponentItem::Let(_) => {}
+                        }
+                    }
+
+                    let mut visit_kind = |kind: &'b ComponentImportKind<'a>| match kind {
+                        ComponentImportKind::Interface(items) => {
+                            for item in items {
+                                match item {
+                                    InterfaceItem::Use(u) => f(PathItem::Item {
+                                        name: None,
+                                        path: &u.from,
+                                        uses: Some(&u.names),
+                                        kind: WorldOrInterface::Interface,
+                                    })?,
+                                    _ => {}
+                                }
+                            }
+                            Ok(())
+                        }
+                        ComponentImportKind::Path(path) => f(PathItem::Item {
+                            name: None,
+                            path,
+                            uses: None,
+                            kind: WorldOrInterface::Interface,
+                        }),
+                        ComponentImportKind::Func(..) => Ok(()),
+                    };
+
+                    for kind in imports {
+                        visit_kind(kind)?;
+                    }
+
+                    // TODO: exports
                 }
             }
         }
@@ -117,6 +186,7 @@ impl<'a> Ast<'a> {
 }
 
 enum AstItem<'a> {
+    Component(ComponentDef<'a>),
     Interface(Interface<'a>),
     World(World<'a>),
     Use(ToplevelUse<'a>),
@@ -125,10 +195,15 @@ enum AstItem<'a> {
 impl<'a> AstItem<'a> {
     fn parse(tokens: &mut Tokenizer<'a>, docs: Docs<'a>) -> Result<Self> {
         match tokens.clone().next()? {
+            Some((_span, Token::Component)) => {
+                ComponentDef::parse(tokens, docs).map(Self::Component)
+            }
             Some((_span, Token::Interface)) => Interface::parse(tokens, docs).map(Self::Interface),
             Some((_span, Token::World)) => World::parse(tokens, docs).map(Self::World),
             Some((_span, Token::Use)) => ToplevelUse::parse(tokens).map(Self::Use),
-            other => Err(err_expected(tokens, "`world`, `interface` or `use`", other).into()),
+            other => Err(
+                err_expected(tokens, "`world`, `interface`, `use` or `component`", other).into(),
+            ),
         }
     }
 }
@@ -187,6 +262,8 @@ impl<'a> ToplevelUse<'a> {
         Ok(ToplevelUse { item, as_ })
     }
 }
+
+include!("def.rs");
 
 struct World<'a> {
     docs: Docs<'a>,

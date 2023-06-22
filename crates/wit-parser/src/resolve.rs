@@ -1,9 +1,9 @@
 use crate::ast::lex::Span;
 use crate::ast::{parse_use_path, AstUsePath};
 use crate::{
-    AstItem, Error, Function, FunctionKind, Handle, IncludeName, Interface, InterfaceId,
-    PackageName, Results, Type, TypeDef, TypeDefKind, TypeId, TypeOwner, UnresolvedPackage, World,
-    WorldId, WorldItem, WorldKey,
+    AstItem, ComponentDef, ComponentDefId, Error, Function, FunctionKind, Handle, IncludeName,
+    Interface, InterfaceId, PackageName, Results, Type, TypeDef, TypeDefKind, TypeId, TypeOwner,
+    UnresolvedPackage, World, WorldId, WorldItem, WorldKey,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use id_arena::{Arena, Id};
@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 /// package as necessary.
 #[derive(Default, Clone)]
 pub struct Resolve {
+    // #[cfg(feature = "component-wit")]
+    pub component_defs: Arena<ComponentDef>,
     pub worlds: Arena<World>,
     pub interfaces: Arena<Interface>,
     pub types: Arena<TypeDef>,
@@ -50,6 +52,10 @@ pub struct Package {
 
     /// All worlds contained in this package, keyed by the world's name.
     pub worlds: IndexMap<String, WorldId>,
+
+    // #[cfg(feature = "component-wit")]
+    /// All component definitions contained in this packaged, keyed by the component's name.
+    pub components: IndexMap<String, ComponentDefId>,
 }
 
 pub type PackageId = Id<Package>;
@@ -273,6 +279,7 @@ impl Resolve {
             types,
             worlds,
             interfaces,
+            component_defs,
             packages,
             package_names,
         } = resolve;
@@ -580,12 +587,71 @@ impl Resolve {
             WorldKey::Interface(i) => self.id_of(*i).expect("unexpected anonymous interface"),
         }
     }
+
+    /// Attempts to locate a world given the "default" package `pkg` and the
+    /// optional string specifier `world`.
+    ///
+    /// This method is intended to be used by bindings generation tools to
+    /// select a world from either `pkg` or a package in this `Resolve`.
+    ///
+    /// If `world` is `None` then `pkg` must have precisely one world which will
+    /// be returned.
+    ///
+    /// If `world` is `Some` then it can either be:
+    ///
+    /// * A kebab-name of a world contained within `pkg` which is being
+    ///   selected, such as `"the-world"`.
+    ///
+    /// * An ID-based form of a world which is selected within this `Resolve`,
+    ///   ignoring `pkg`. For example `"wasi:http/proxy"`.
+    ///
+    /// If successful the corresponding `WorldId` is returned, otherwise an
+    /// error is returned.
+    pub fn select_component(
+        &self,
+        pkg: PackageId,
+        component: Option<&str>,
+    ) -> Result<ComponentDefId> {
+        let component = match component {
+            Some(component) => component,
+            None => {
+                let pkg = &self.packages[pkg];
+                match pkg.components.len() {
+                    0 => bail!("no components found in package `{}`", pkg.name),
+                    1 => return Ok(*pkg.components.values().next().unwrap()),
+                    _ => bail!(
+                        "multiple components found in package `{}`: one must be explicitly chosen",
+                        pkg.name
+                    ),
+                }
+            }
+        };
+
+        let path = parse_use_path(component)
+            .with_context(|| format!("failed to parse component specifier `{component}`"))?;
+        let (pkg, component) = match path {
+            AstUsePath::Name(name) => (pkg, name),
+            AstUsePath::Package(pkg, item) => (
+                *self
+                    .package_names
+                    .get(&pkg)
+                    .ok_or_else(|| anyhow!("unknown package `{pkg}`"))?,
+                item,
+            ),
+        };
+        let pkg = &self.packages[pkg];
+        pkg.components
+            .get(&component)
+            .copied()
+            .ok_or_else(|| anyhow!("no component named `{component}` in package"))
+    }
 }
 
 /// Structure returned by [`Resolve::merge`] which contains mappings from
 /// old-ids to new-ids after the merge.
 #[derive(Default)]
 pub struct Remap {
+    pub components: Vec<ComponentDefId>,
     pub types: Vec<TypeId>,
     pub interfaces: Vec<InterfaceId>,
     pub worlds: Vec<WorldId>,
@@ -698,11 +764,14 @@ impl Remap {
             }
         }
 
+        // TODO: elaborate all component definitions
+
         // Fixup "parent" ids now that everything has been identified
         let pkgid = resolve.packages.alloc(Package {
             name: unresolved.name.clone(),
             interfaces: Default::default(),
             worlds: Default::default(),
+            components: Default::default(),
         });
         let prev = resolve.package_names.insert(unresolved.name.clone(), pkgid);
         assert!(prev.is_none());
@@ -722,6 +791,15 @@ impl Remap {
                 .insert(world.name.clone(), *id);
             assert!(prev.is_none());
         }
+        for id in self.components.iter() {
+            let component = &mut resolve.component_defs[*id];
+            component.package = Some(pkgid);
+            let prev = resolve.packages[pkgid]
+                .components
+                .insert(component.name.clone(), *id);
+            assert!(prev.is_none());
+        }
+
         Ok(pkgid)
     }
 
@@ -750,6 +828,9 @@ impl Remap {
                             (pkg_name, name, unresolved.foreign_dep_spans[i]),
                         );
                         assert!(prev.is_none());
+                    }
+                    AstItem::Component(_unresolved_component_id) => {
+                        todo!()
                     }
                 }
             }
@@ -1076,7 +1157,7 @@ impl Remap {
             match item {
                 WorldItem::Interface(id) => {
                     let id = self.interfaces[id.index()];
-                    self.add_world_import(resolve, world, name, id);
+                    self.add_world_import(resolve, &mut world.imports, name, id);
                 }
                 WorldItem::Function(mut f) => {
                     self.update_function(resolve, &mut f);
@@ -1093,7 +1174,7 @@ impl Remap {
             if let TypeDefKind::Type(Type::Id(other)) = resolve.types[*id].kind {
                 if let TypeOwner::Interface(owner) = resolve.types[other].owner {
                     let name = WorldKey::Interface(owner);
-                    self.add_world_import(resolve, world, name, owner);
+                    self.add_world_import(resolve, &mut world.imports, name, owner);
                 }
             }
         }
@@ -1218,19 +1299,19 @@ impl Remap {
     fn add_world_import(
         &self,
         resolve: &Resolve,
-        world: &mut World,
+        imports: &mut IndexMap<WorldKey, WorldItem>,
         key: WorldKey,
         id: InterfaceId,
     ) {
-        if world.imports.contains_key(&key) {
+        if imports.contains_key(&key) {
             return;
         }
         let ok = foreach_interface_dep(resolve, id, |dep| {
-            self.add_world_import(resolve, world, WorldKey::Interface(dep), dep);
+            self.add_world_import(resolve, imports, WorldKey::Interface(dep), dep);
             true
         });
         assert!(ok);
-        let prev = world.imports.insert(key, WorldItem::Interface(id));
+        let prev = imports.insert(key, WorldItem::Interface(id));
         assert!(prev.is_none());
     }
 

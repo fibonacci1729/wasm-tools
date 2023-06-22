@@ -162,6 +162,7 @@ impl<'a> ComponentInfo<'a> {
             },
             worlds: [(world_name.to_string(), world)].into_iter().collect(),
             interfaces: Default::default(),
+            components: Default::default(),
         };
 
         for (_name, item) in self.externs.iter() {
@@ -284,6 +285,7 @@ impl WitPackageDecoder<'_> {
             },
             interfaces: Default::default(),
             worlds: Default::default(),
+            components: Default::default(),
         };
 
         for (name, ty) in ty.exports.iter() {
@@ -557,6 +559,7 @@ impl WitPackageDecoder<'_> {
                 name: package_name.clone(),
                 interfaces: Default::default(),
                 worlds: Default::default(),
+                components: Default::default(),
             });
         let interface = *package
             .interfaces

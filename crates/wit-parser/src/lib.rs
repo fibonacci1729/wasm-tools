@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use id_arena::{Arena, Id};
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use semver::Version;
 use std::borrow::Cow;
 use std::fmt;
@@ -23,6 +23,7 @@ pub fn validate_id(s: &str) -> Result<()> {
     Ok(())
 }
 
+pub type ComponentDefId = Id<ComponentDef>;
 pub type WorldId = Id<World>;
 pub type InterfaceId = Id<Interface>;
 pub type TypeId = Id<TypeDef>;
@@ -78,6 +79,9 @@ pub struct UnresolvedPackage {
     /// other types transitively that are already iterated over.
     pub types: Arena<TypeDef>,
 
+    /// All component definitions from all documents within this package.
+    pub component_defs: Arena<ComponentDef>,
+
     /// All foreign dependencies that this package depends on.
     ///
     /// These foreign dependencies must be resolved to convert this unresolved
@@ -89,6 +93,8 @@ pub struct UnresolvedPackage {
     pub foreign_deps: IndexMap<PackageName, IndexMap<String, AstItem>>,
 
     unknown_type_spans: Vec<Span>,
+    component_item_spans: Vec<(Vec<Span>, Vec<Span>)>,
+    component_spans: Vec<Span>,
     world_item_spans: Vec<(Vec<Span>, Vec<Span>)>,
     interface_spans: Vec<Span>,
     world_spans: Vec<Span>,
@@ -100,6 +106,7 @@ pub struct UnresolvedPackage {
 
 #[derive(Debug, Copy, Clone)]
 pub enum AstItem {
+    Component(ComponentDefId),
     Interface(InterfaceId),
     World(WorldId),
 }
@@ -295,6 +302,35 @@ pub enum WorldItem {
     ///
     /// Note that types are never imported into worlds at this time.
     Type(TypeId),
+}
+
+#[derive(Debug, Clone)]
+pub struct ComponentDef {
+    /// The package that owns this component definition.
+    pub package: Option<PackageId>,
+    /// The WIT identifier name of this component definition.
+    pub name: String,
+    /// Documentation associated with this component definition.
+    pub docs: Docs,
+    /// All imported items into this component definition.
+    pub imports: IndexMap<WorldKey, WorldItem>,
+    /// All component dependencies.
+    pub dependencies: IndexSet<PackageName>,
+    /// The set of instantiation statements enumerated in this component definition.
+    pub instantiations: Vec<Instantiation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Instantiation {
+    /// The id of the component being instantiated.
+    pub dependency: usize,
+    /// Arguments passed to the instantiation.
+    pub arguments: Vec<InstantiationArg>,
+}
+
+#[derive(Debug, Clone)]
+pub enum InstantiationArg {
+    // TODO
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-use super::{Error, ParamList, ResultList, WorldOrInterface};
+use super::{Error, ParamList, PathItem, ResultList, WorldOrInterface};
 use crate::ast::toposort::toposort;
 use crate::*;
 use anyhow::{bail, Result};
@@ -18,6 +18,8 @@ pub struct Resolver<'a> {
     types: Arena<TypeDef>,
     interfaces: Arena<Interface>,
     worlds: Arena<World>,
+
+    component_defs: Arena<ComponentDef>,
 
     // Interning structure for types which-need-not-be-named such as
     // `list<string>` and such.
@@ -47,9 +49,13 @@ pub struct Resolver<'a> {
     /// from, and the final value is the assigned ID of the interface.
     foreign_deps: IndexMap<PackageName, IndexMap<&'a str, AstItem>>,
 
+    /// All foreign component implementation dependencies.
+    foreign_impls: HashSet<PackageName>,
+
     /// All interfaces that are present within `self.foreign_deps`.
     foreign_interfaces: HashSet<InterfaceId>,
 
+    /// All worlds that are present within `self.foreign_deps`.
     foreign_worlds: HashSet<WorldId>,
 
     /// The current type lookup scope which will eventually make its way into
@@ -73,9 +79,20 @@ pub struct Resolver<'a> {
     /// reporting during the final `Resolve` phase.
     interface_spans: Vec<Span>,
 
+    /// The span of each component defintion which is used for error
+    /// reporting during the final `Resolve` phase.
+    component_spans: Vec<Span>,
+
+    /// Spans for each item within a component definition used for error reporting.
+    component_item_spans: Vec<(Vec<Span>, Vec<Span>)>,
+
     /// Spans per entry in `self.foreign_deps` for where the dependency was
     /// introduced to print an error message if necessary.
     foreign_dep_spans: Vec<Span>,
+
+    /// Spans per entry in `self.foreign_impls` for where the dependency was
+    /// introduced to print an error message if necessary.
+    foreign_impl_spans: Vec<Span>,
 
     include_world_spans: Vec<Span>,
 
@@ -147,7 +164,7 @@ impl<'a> Resolver<'a> {
         // all interfaces in the package to visit.
         let asts = mem::take(&mut self.asts);
         self.populate_foreign_deps(&asts);
-        let (iface_order, world_order) = self.populate_ast_items(&asts)?;
+        let (iface_order, world_order, component_order) = self.populate_ast_items(&asts)?;
         self.populate_foreign_types(&asts)?;
 
         // Use the topological ordering of all interfaces to resolve all
@@ -155,6 +172,7 @@ impl<'a> Resolver<'a> {
         // generated here to assist with this.
         let mut iface_id_to_ast = IndexMap::new();
         let mut world_id_to_ast = IndexMap::new();
+        let mut component_id_to_ast = IndexMap::new();
         for (i, ast) in asts.iter().enumerate() {
             for item in ast.items.iter() {
                 match item {
@@ -162,6 +180,7 @@ impl<'a> Resolver<'a> {
                         let id = match self.ast_items[i][iface.name.name] {
                             AstItem::Interface(id) => id,
                             AstItem::World(_) => unreachable!(),
+                            AstItem::Component(_) => unreachable!(),
                         };
                         iface_id_to_ast.insert(id, (iface, i));
                     }
@@ -169,10 +188,19 @@ impl<'a> Resolver<'a> {
                         let id = match self.ast_items[i][world.name.name] {
                             AstItem::World(id) => id,
                             AstItem::Interface(_) => unreachable!(),
+                            AstItem::Component(_) => unreachable!(),
                         };
                         world_id_to_ast.insert(id, (world, i));
                     }
                     ast::AstItem::Use(_) => {}
+                    ast::AstItem::Component(comdef) => {
+                        let id = match self.ast_items[i][comdef.name.name] {
+                            AstItem::Component(id) => id,
+                            AstItem::World(_) => unreachable!(),
+                            AstItem::Interface(_) => unreachable!(),
+                        };
+                        component_id_to_ast.insert(id, (comdef, i));
+                    }
                 }
             }
         }
@@ -189,11 +217,18 @@ impl<'a> Resolver<'a> {
             self.resolve_world(id, workld)?;
         }
 
+        for id in component_order {
+            let (component, i) = &component_id_to_ast[&id];
+            self.cur_ast_index = *i;
+            self.resolve_component(id, component)?;
+        }
+
         Ok(UnresolvedPackage {
             name,
             worlds: mem::take(&mut self.worlds),
             types: mem::take(&mut self.types),
             interfaces: mem::take(&mut self.interfaces),
+            component_defs: mem::take(&mut self.component_defs),
             foreign_deps: self
                 .foreign_deps
                 .iter()
@@ -210,6 +245,8 @@ impl<'a> Resolver<'a> {
             world_item_spans: mem::take(&mut self.world_item_spans),
             interface_spans: mem::take(&mut self.interface_spans),
             world_spans: mem::take(&mut self.world_spans),
+            component_item_spans: mem::take(&mut self.component_item_spans),
+            component_spans: mem::take(&mut self.component_spans),
             foreign_dep_spans: mem::take(&mut self.foreign_dep_spans),
             source_map: SourceMap::default(),
             include_world_spans: mem::take(&mut self.include_world_spans),
@@ -225,44 +262,55 @@ impl<'a> Resolver<'a> {
         let mut foreign_deps = mem::take(&mut self.foreign_deps);
         let mut foreign_interfaces = mem::take(&mut self.foreign_interfaces);
         let mut foreign_worlds = mem::take(&mut self.foreign_worlds);
+        let mut foreign_impls = mem::take(&mut self.foreign_impls);
         for ast in asts {
-            ast.for_each_path(|_, path, _names, world_or_iface| {
-                let (id, name) = match path {
-                    ast::UsePath::Package { id, name } => (id, name),
-                    _ => return Ok(()),
-                };
+            ast.for_each_path(|item| {
+                match item {
+                    PathItem::Item { path, kind, .. } => {
+                        let (id, name) = match path {
+                            ast::UsePath::Package { id, name } => (id, name),
+                            _ => return Ok(()),
+                        };
 
-                let deps = foreign_deps.entry(id.package_name()).or_insert_with(|| {
-                    self.foreign_dep_spans.push(id.span);
-                    IndexMap::new()
-                });
-                let id = *deps.entry(name.name).or_insert_with(|| {
-                    match world_or_iface {
-                        WorldOrInterface::World => {
-                            log::trace!(
-                                "creating a world for foreign dep: {}/{}",
-                                id.package_name(),
-                                name.name
-                            );
-                            AstItem::World(self.alloc_world(name.span, true))
-                        }
-                        WorldOrInterface::Interface | WorldOrInterface::Unknown => {
-                            // Currently top-level `use` always assumes an interface, so the
-                            // `Unknown` case is the same as `Interface`.
-                            log::trace!(
-                                "creating an interface for foreign dep: {}/{}",
-                                id.package_name(),
-                                name.name
-                            );
-                            AstItem::Interface(self.alloc_interface(name.span))
-                        }
+                        let deps = foreign_deps.entry(id.package_name()).or_insert_with(|| {
+                            self.foreign_dep_spans.push(id.span);
+                            IndexMap::new()
+                        });
+
+                        let id = *deps.entry(name.name).or_insert_with(|| {
+                            match kind {
+                                WorldOrInterface::World => {
+                                    log::trace!(
+                                        "creating a world for foreign dep: {}/{}",
+                                        id.package_name(),
+                                        name.name
+                                    );
+                                    AstItem::World(self.alloc_world(name.span, true))
+                                }
+                                WorldOrInterface::Interface | WorldOrInterface::Unknown => {
+                                    // Currently top-level `use` always assumes an interface, so the
+                                    // `Unknown` case is the same as `Interface`.
+                                    log::trace!(
+                                        "creating an interface for foreign dep: {}/{}",
+                                        id.package_name(),
+                                        name.name
+                                    );
+                                    AstItem::Interface(self.alloc_interface(name.span))
+                                }
+                            }
+                        });
+
+                        let _ = match id {
+                            AstItem::Interface(id) => foreign_interfaces.insert(id),
+                            AstItem::World(id) => foreign_worlds.insert(id),
+                            AstItem::Component(id) => false,
+                        };
                     }
-                });
-
-                let _ = match id {
-                    AstItem::Interface(id) => foreign_interfaces.insert(id),
-                    AstItem::World(id) => foreign_worlds.insert(id),
-                };
+                    PathItem::Impl { id } => {
+                        foreign_impls.insert(id.package_name());
+                        self.foreign_impl_spans.push(id.name.span);
+                    }
+                }
 
                 Ok(())
             })
@@ -271,6 +319,19 @@ impl<'a> Resolver<'a> {
         self.foreign_deps = foreign_deps;
         self.foreign_interfaces = foreign_interfaces;
         self.foreign_worlds = foreign_worlds;
+        self.foreign_impls = foreign_impls;
+    }
+
+    fn alloc_component(&mut self, span: Span) -> ComponentDefId {
+        self.component_spans.push(span);
+        self.component_defs.alloc(ComponentDef {
+            package: None,
+            name: String::new(),
+            docs: Docs::default(),
+            imports: IndexMap::new(),
+            dependencies: IndexSet::new(),
+            instantiations: Vec::new(),
+        })
     }
 
     fn alloc_interface(&mut self, span: Span) -> InterfaceId {
@@ -307,7 +368,7 @@ impl<'a> Resolver<'a> {
     fn populate_ast_items(
         &mut self,
         asts: &[ast::Ast<'a>],
-    ) -> Result<(Vec<InterfaceId>, Vec<WorldId>)> {
+    ) -> Result<(Vec<InterfaceId>, Vec<WorldId>, Vec<ComponentDefId>)> {
         let mut package_items = IndexMap::new();
 
         // Validate that all worlds and interfaces have unique names within this
@@ -347,6 +408,20 @@ impl<'a> Resolver<'a> {
                         let prev = names.insert(w.name.name, item);
                         assert!(prev.is_none());
                     }
+                    ast::AstItem::Component(c) => {
+                        if package_items.insert(c.name.name, c.name.span).is_some() {
+                            bail!(Error {
+                                span: c.name.span,
+                                msg: format!("duplicate item named `{}`", c.name.name),
+                            })
+                        }
+                        let prev = ast_ns.insert(c.name.name, ());
+                        assert!(prev.is_none());
+                        let prev = order.insert(c.name.name, Vec::new());
+                        assert!(prev.is_none());
+                        let prev = names.insert(c.name.name, item);
+                        assert!(prev.is_none());
+                    }
                     // These are processed down below.
                     ast::AstItem::Use(_) => {}
                 }
@@ -381,6 +456,7 @@ impl<'a> Resolver<'a> {
                     }
                     ast::AstItem::Interface(i) => (&i.name, ItemSource::Local(i.name.clone())),
                     ast::AstItem::World(w) => (&w.name, ItemSource::Local(w.name.clone())),
+                    ast::AstItem::Component(c) => (&c.name, ItemSource::Local(c.name.clone())),
                 };
                 if ast_ns.insert(name.name, (name.span, src)).is_some() {
                     bail!(Error {
@@ -392,37 +468,43 @@ impl<'a> Resolver<'a> {
 
             // With this file's namespace information look at all `use` paths
             // and record dependencies between interfaces.
-            ast.for_each_path(|iface, path, _names, _| {
-                // If this import isn't contained within an interface then it's
-                // in a world and it doesn't need to participate in our
-                // topo-sort.
-                let iface = match iface {
-                    Some(name) => name,
-                    None => return Ok(()),
-                };
-                let used_name = match path {
-                    ast::UsePath::Id(id) => id,
-                    ast::UsePath::Package { .. } => return Ok(()),
-                };
-                match ast_ns.get(used_name.name) {
-                    Some((_, ItemSource::Foreign)) => return Ok(()),
-                    Some((_, ItemSource::Local(id))) => {
-                        order[iface.name].push(id.clone());
+            // ast.for_each_path(|iface, path, _names, _| {
+            ast.for_each_path(|item| {
+                match item {
+                    PathItem::Item { name, path, .. } => {
+                        // If this import isn't contained within an interface then it's
+                        // in a world and it doesn't need to participate in our
+                        // topo-sort.
+                        let iface = match name {
+                            Some(name) => name,
+                            None => return Ok(()),
+                        };
+                        let used_name = match path {
+                            ast::UsePath::Id(id) => id,
+                            ast::UsePath::Package { .. } => return Ok(()),
+                        };
+                        match ast_ns.get(used_name.name) {
+                            Some((_, ItemSource::Foreign)) => return Ok(()),
+                            Some((_, ItemSource::Local(id))) => {
+                                order[iface.name].push(id.clone());
+                            }
+                            None => match package_items.get(used_name.name) {
+                                Some(_) => {
+                                    order[iface.name].push(used_name.clone());
+                                }
+                                None => {
+                                    bail!(Error {
+                                        span: used_name.span,
+                                        msg: format!(
+                                            "interface or world `{name}` not found in package",
+                                            name = used_name.name
+                                        ),
+                                    })
+                                }
+                            },
+                        }
                     }
-                    None => match package_items.get(used_name.name) {
-                        Some(_) => {
-                            order[iface.name].push(used_name.clone());
-                        }
-                        None => {
-                            bail!(Error {
-                                span: used_name.span,
-                                msg: format!(
-                                    "interface or world `{name}` not found in package",
-                                    name = used_name.name
-                                ),
-                            })
-                        }
-                    },
+                    PathItem::Impl { .. } => {}
                 }
                 Ok(())
             })?;
@@ -437,6 +519,7 @@ impl<'a> Resolver<'a> {
         let mut ids = IndexMap::new();
         let mut iface_id_order = Vec::new();
         let mut world_id_order = Vec::new();
+        let mut component_id_order = Vec::new();
         for name in order {
             match names.get(name).unwrap() {
                 ast::AstItem::Interface(_) => {
@@ -453,6 +536,13 @@ impl<'a> Resolver<'a> {
                     let prev = ids.insert(name, AstItem::World(id));
                     assert!(prev.is_none());
                     world_id_order.push(id);
+                }
+                ast::AstItem::Component(_) => {
+                    let id = self.alloc_component(package_items[name]);
+                    self.component_defs[id].name = name.to_string();
+                    let prev = ids.insert(name, AstItem::Component(id));
+                    assert!(prev.is_none());
+                    component_id_order.push(id);
                 }
                 ast::AstItem::Use(_) => unreachable!(),
             };
@@ -487,6 +577,11 @@ impl<'a> Resolver<'a> {
                         assert!(matches!(world_item, AstItem::World(_)));
                         (w.name.name, world_item)
                     }
+                    ast::AstItem::Component(c) => {
+                        let component_item = ids[c.name.name];
+                        assert!(matches!(component_item, AstItem::Component(_)));
+                        (c.name.name, component_item)
+                    }
                 };
                 let prev = items.insert(name, ast_item);
                 assert!(prev.is_none());
@@ -500,7 +595,7 @@ impl<'a> Resolver<'a> {
             }
             self.ast_items.push(items);
         }
-        Ok((iface_id_order, world_id_order))
+        Ok((iface_id_order, world_id_order, component_id_order))
     }
 
     /// Generate a `Type::Unknown` entry for all types imported from foreign
@@ -512,42 +607,192 @@ impl<'a> Resolver<'a> {
     fn populate_foreign_types(&mut self, asts: &[ast::Ast<'a>]) -> Result<()> {
         for (i, ast) in asts.iter().enumerate() {
             self.cur_ast_index = i;
-            ast.for_each_path(|_, path, names, _| {
-                let names = match names {
-                    Some(names) => names,
-                    None => return Ok(()),
-                };
-                let (item, name, span) = self.resolve_ast_item_path(path)?;
-                let iface = self.extract_iface_from_item(&item, &name, span)?;
-                if !self.foreign_interfaces.contains(&iface) {
-                    return Ok(());
-                }
+            // ast.for_each_path(|_, path, names, _| {
+            ast.for_each_path(|item| {
+                match item {
+                    PathItem::Item { path, uses, .. } => {
+                        let names = match uses {
+                            Some(names) => names,
+                            None => return Ok(()),
+                        };
+                        let (item, name, span) = self.resolve_ast_item_path(path)?;
+                        let iface = self.extract_iface_from_item(&item, &name, span)?;
+                        if !self.foreign_interfaces.contains(&iface) {
+                            return Ok(());
+                        }
 
-                let lookup = &mut self.interface_types[iface.index()];
-                for name in names {
-                    // If this name has already been defined then use that prior
-                    // definition, otherwise create a new type with an unknown
-                    // representation and insert it into the various maps.
-                    if lookup.contains_key(name.name.name) {
-                        continue;
+                        let lookup = &mut self.interface_types[iface.index()];
+                        for name in names {
+                            // If this name has already been defined then use that prior
+                            // definition, otherwise create a new type with an unknown
+                            // representation and insert it into the various maps.
+                            if lookup.contains_key(name.name.name) {
+                                continue;
+                            }
+                            let id = self.types.alloc(TypeDef {
+                                docs: Docs::default(),
+                                kind: TypeDefKind::Unknown,
+                                name: Some(name.name.name.to_string()),
+                                owner: TypeOwner::Interface(iface),
+                            });
+                            self.unknown_type_spans.push(name.name.span);
+                            lookup.insert(name.name.name, (TypeOrItem::Type(id), name.name.span));
+                            self.interfaces[iface]
+                                .types
+                                .insert(name.name.name.to_string(), id);
+                        }
                     }
-                    let id = self.types.alloc(TypeDef {
-                        docs: Docs::default(),
-                        kind: TypeDefKind::Unknown,
-                        name: Some(name.name.name.to_string()),
-                        owner: TypeOwner::Interface(iface),
-                    });
-                    self.unknown_type_spans.push(name.name.span);
-                    lookup.insert(name.name.name, (TypeOrItem::Type(id), name.name.span));
-                    self.interfaces[iface]
-                        .types
-                        .insert(name.name.name.to_string(), id);
+                    PathItem::Impl { .. } => {}
                 }
-
                 Ok(())
             })?;
         }
         Ok(())
+    }
+
+    fn resolve_component_import_item(
+        &mut self,
+        docs: &ast::Docs<'a>,
+        name: &ast::Id<'a>,
+        kind: &ast::ComponentImportKind<'a>,
+    ) -> Result<WorldItem> {
+        match kind {
+            ast::ComponentImportKind::Interface(items) => {
+                let prev = mem::take(&mut self.type_lookup);
+                let id = self.alloc_interface(name.span);
+                self.resolve_interface(id, items, docs)?;
+                self.type_lookup = prev;
+                Ok(WorldItem::Interface(id))
+            }
+            ast::ComponentImportKind::Path(path) => {
+                let (item, name, span) = self.resolve_ast_item_path(path)?;
+                let id = self.extract_iface_from_item(&item, &name, span)?;
+                Ok(WorldItem::Interface(id))
+            }
+            ast::ComponentImportKind::Func(func) => {
+                let func =
+                    self.resolve_function(docs, name.name, func, FunctionKind::Freestanding)?;
+                Ok(WorldItem::Function(func))
+            }
+        }
+    }
+
+    fn resolve_component(
+        &mut self,
+        component_id: ComponentDefId,
+        component: &ast::ComponentDef<'a>,
+    ) -> Result<ComponentDefId> {
+        fn use_name<'a>(
+            used_names: &mut HashMap<&'a str, &'static str>,
+            name: &ast::Id<'a>,
+            desc: &'static str,
+        ) -> Result<()> {
+            let prev = used_names.insert(name.name, desc);
+            if let Some(prev) = prev {
+                return Err(Error {
+                    span: name.span,
+                    msg: format!(
+                        "{desc} `{name}` conflicts with prior {prev} of same name",
+                        name = name.name
+                    ),
+                }
+                .into());
+            }
+            Ok(())
+        }
+
+        let docs = self.docs(&component.docs);
+        self.component_defs[component_id].docs = docs;
+
+        let mut imported_interfaces = HashSet::new();
+        let mut used_components = HashSet::new();
+        let mut used_component_spans = Vec::new();
+        let mut import_spans = Vec::new();
+        let mut used_names = HashMap::new();
+
+        let mut component_deps = IndexMap::new();
+
+        for item in component.items.iter() {
+            match item {
+                ast::ComponentItem::Import(import) => {
+                    let docs = &import.docs;
+                    let name = &import.name;
+                    let kind = &import.kind;
+
+                    let key = match &kind {
+                        ast::ComponentImportKind::Interface(_) => {
+                            use_name(&mut used_names, name, "interface")?;
+                            WorldKey::Name(name.name.to_string())
+                        }
+                        ast::ComponentImportKind::Func(_) => {
+                            use_name(&mut used_names, name, "func")?;
+                            WorldKey::Name(name.name.to_string())
+                        }
+                        ast::ComponentImportKind::Path(path) => {
+                            use_name(&mut used_names, name, "interface")?;
+                            let (item, name, span) = self.resolve_ast_item_path(path)?;
+                            let id = self.extract_iface_from_item(&item, &name, span)?;
+                            WorldKey::Interface(id)
+                        }
+                    };
+
+                    let item = self.resolve_component_import_item(&docs, &name, &kind)?;
+                    if let WorldItem::Interface(id) = item {
+                        if !imported_interfaces.insert(id) {
+                            bail!(Error {
+                                span: import.name.span,
+                                msg: format!("interface cannot be imported more than once"),
+                            })
+                        }
+                    }
+
+                    let prev = self.component_defs[component_id].imports.insert(key, item);
+
+                    assert!(prev.is_none());
+                    import_spans.push(name.span);
+                }
+                ast::ComponentItem::Use {
+                    docs: _,
+                    package,
+                    as_,
+                } => {
+                    use_name(&mut used_names, as_, "component")?;
+
+                    let package_name = package.package_name();
+
+                    let dep_id = self.foreign_impls.get(&package_name).cloned().unwrap();
+
+                    if !used_components.insert(dep_id) {
+                        bail!(Error {
+                            span: package.name.span,
+                            msg: format!("component cannot be used more than once"),
+                        })
+                    }
+
+                    let (idx, prev) = self.component_defs[component_id]
+                        .dependencies
+                        .insert_full(package_name);
+
+                    assert!(prev);
+
+                    let prev = component_deps.insert(as_.name, (as_.span, idx));
+
+                    assert!(prev.is_none());
+
+                    used_component_spans.push(package.name.span);
+                }
+                ast::ComponentItem::Let(stmt) => {
+                    use_name(&mut used_names, &stmt.name, "instance")?;
+                    todo!("resolve component let");
+                }
+            }
+        }
+
+        self.component_item_spans
+            .push((import_spans, used_component_spans));
+        self.type_lookup.clear();
+
+        Ok(component_id)
     }
 
     fn resolve_world(&mut self, world_id: WorldId, world: &ast::World<'a>) -> Result<WorldId> {
@@ -989,6 +1234,15 @@ impl<'a> Resolver<'a> {
                     msg: format!("name `{}` is defined as a world, not an interface", name),
                 })
             }
+            AstItem::Component(_) => {
+                bail!(Error {
+                    span: span,
+                    msg: format!(
+                        "name `{}` is defined as a component, not an interface",
+                        name
+                    ),
+                })
+            }
         }
     }
 
@@ -999,6 +1253,12 @@ impl<'a> Resolver<'a> {
                 bail!(Error {
                     span: span,
                     msg: format!("name `{}` is defined as an interface, not a world", name),
+                })
+            }
+            AstItem::Component(_) => {
+                bail!(Error {
+                    span: span,
+                    msg: format!("name `{}` is defined as a component, not a world", name),
                 })
             }
         }

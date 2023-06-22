@@ -42,6 +42,8 @@ pub enum Token {
     RightParen,
     LeftBrace,
     RightBrace,
+    LeftBracket,
+    RightBracket,
     LessThan,
     GreaterThan,
     RArrow,
@@ -91,6 +93,9 @@ pub enum Token {
     World,
     Package,
     Constructor,
+    Component,
+    Let,
+    New,
 
     Id,
     ExplicitId,
@@ -213,6 +218,8 @@ impl<'a> Tokenizer<'a> {
             ')' => RightParen,
             '{' => LeftBrace,
             '}' => RightBrace,
+            '[' => LeftBracket,
+            ']' => RightBracket,
             '<' => LessThan,
             '>' => GreaterThan,
             '*' => Star,
@@ -294,6 +301,9 @@ impl<'a> Tokenizer<'a> {
                     "constructor" => Constructor,
                     "include" => Include,
                     "with" => With,
+                    "component" => Component,
+                    "let" => Let,
+                    "new" => New,
                     _ => Id,
                 }
             }
@@ -499,6 +509,8 @@ impl Token {
             RightParen => "')'",
             LeftBrace => "'{'",
             RightBrace => "'}'",
+            LeftBracket => "'['",
+            RightBracket => "']'",
             LessThan => "'<'",
             GreaterThan => "'>'",
             Use => "keyword `use`",
@@ -552,6 +564,9 @@ impl Token {
             Integer => "an integer",
             Include => "keyword `include`",
             With => "keyword `with`",
+            Component => "keyword `component`",
+            Let => "keyword `let`",
+            New => "keyword `new`",
         }
     }
 }

@@ -69,6 +69,7 @@ impl Default for Bindgen {
             },
             interfaces: Default::default(),
             worlds: Default::default(),
+            components: Default::default(),
         });
         let world = resolve.worlds.alloc(World {
             name: "root".to_string(),

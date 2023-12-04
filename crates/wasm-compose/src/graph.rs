@@ -269,7 +269,7 @@ impl<'a> Component<'a> {
     }
 
     /// Finds a compatible instance export on the component for the given instance type.
-    pub(crate) fn find_compatible_export(
+    pub fn find_compatible_export(
         &self,
         ty: ComponentInstanceTypeId,
         types: TypesRef,
@@ -553,7 +553,7 @@ impl<'a> CompositionGraph<'a> {
     /// inter-component connections have been made.  It ensures that each set of
     /// identical imports composed component can be merged into a single import
     /// in the output component.
-    pub(crate) fn unify_imported_resources(&self) {
+    pub fn unify_imported_resources(&self) {
         let mut resource_mapping = self.resource_mapping.borrow_mut();
 
         let mut resource_imports = HashMap::<_, Vec<_>>::new();
@@ -612,7 +612,7 @@ impl<'a> CompositionGraph<'a> {
     ///
     /// Note that although this method takes a shared reference, it uses
     /// internal mutability to update the remapping.
-    pub(crate) fn try_connection(
+    pub fn try_connection(
         &self,
         export_component: ComponentId,
         mut export_type: ComponentEntityType,

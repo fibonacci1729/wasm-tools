@@ -1,0 +1,5 @@
+/// My component does cool stuff.
+component {
+  import log: func(msg: string);
+  export run: func() -> u32;
+}

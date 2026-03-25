@@ -20,12 +20,68 @@ pub mod toposort;
 
 pub use lex::validate_id;
 
-/// Representation of a single WIT `*.wit` file and nested packages.
+/// The result of parsing a single WIT `*.wit` file.
+///
+/// A WIT file is either a "package file" (with an optional `package` header
+/// followed by interfaces, worlds, etc.) or a "component file" containing a
+/// single unnamed `component { ... }` definition.
+enum WitFile<'a> {
+    Package(PackageFile<'a>),
+    Component(ComponentFile<'a>),
+}
+
+/// A traditional package-based WIT file.
 struct PackageFile<'a> {
     /// Optional `package foo:bar;` header
     package_id: Option<PackageName<'a>>,
     /// Other AST items.
     decl_list: DeclList<'a>,
+}
+
+/// A WIT file containing a single unnamed `component { ... }` definition.
+struct ComponentFile<'a> {
+    /// Doc comments preceding the `component` keyword.
+    docs: Docs<'a>,
+    /// The span of the `component` keyword.
+    span: Span,
+    /// The body items (identical to world items).
+    items: Vec<WorldItem<'a>>,
+    /// Any `use` or inline `package ... { ... }` items that appeared before
+    /// the `component` keyword. These are used for dependency resolution.
+    preamble: Vec<AstItem<'a>>,
+}
+
+impl<'a> WitFile<'a> {
+    /// Parse a standalone WIT file represented by `tokens`.
+    ///
+    /// Determines whether the file is a package file or a component file
+    /// and dispatches accordingly.
+    fn parse(tokens: &mut Tokenizer<'a>) -> Result<Self> {
+        // Scan ahead through the token stream to see if a `component` keyword
+        // appears at brace-depth 0. If so, this is a component file.
+        // A component file can have preamble items (`use`, `package { ... }`)
+        // before the `component` keyword, so we need to look past them.
+        if Self::has_toplevel_component(tokens) {
+            return ComponentFile::parse(tokens).map(WitFile::Component);
+        }
+        PackageFile::parse(tokens).map(WitFile::Package)
+    }
+
+    /// Returns `true` if a `component` keyword appears at brace depth 0 in
+    /// the remaining token stream.
+    fn has_toplevel_component(tokens: &Tokenizer<'a>) -> bool {
+        let mut peek = tokens.clone();
+        let mut depth: u32 = 0;
+        loop {
+            match peek.next() {
+                Ok(Some((_, Token::LeftBrace))) => depth += 1,
+                Ok(Some((_, Token::RightBrace))) => depth = depth.saturating_sub(1),
+                Ok(Some((_, Token::Component))) if depth == 0 => return true,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return false,
+            }
+        }
+    }
 }
 
 impl<'a> PackageFile<'a> {
@@ -77,6 +133,172 @@ impl<'a> PackageFile<'a> {
             package_id: Some(package_id),
             decl_list,
         })
+    }
+}
+
+impl<'a> ComponentFile<'a> {
+    /// Parse a component file.
+    ///
+    /// The file may contain optional `use` statements and inline
+    /// `package ... { ... }` blocks before the single `component { ... }`
+    /// block. A `package ...;` header is not allowed.
+    fn parse(tokens: &mut Tokenizer<'a>) -> Result<Self> {
+        // Collect any preamble items (top-level `use` and inline `package`)
+        // that appear before the `component` keyword.
+        let mut preamble = Vec::new();
+        loop {
+            let mut peek = tokens.clone();
+            let _preamble_docs = parse_docs(&mut peek)?;
+            if peek.eat(Token::Component)? {
+                // We've reached the component keyword — stop collecting preamble.
+                break;
+            }
+            let preamble_docs = parse_docs(tokens)?;
+            let attributes = Attribute::parse_list(tokens)?;
+            match tokens.clone().next()? {
+                Some((_span, Token::Use)) => {
+                    preamble.push(AstItem::Use(ToplevelUse::parse(tokens, attributes)?));
+                }
+                Some((span, Token::Package)) => {
+                    // Detect `package foo:bar;` header form vs
+                    // `package foo:bar { ... }` nested form.
+                    // Only the nested form is allowed in component files.
+                    let mut header_peek = tokens.clone();
+                    header_peek.expect(Token::Package).ok();
+                    // Skip the package name to check what follows
+                    let _ = PackageName::parse(&mut header_peek, Docs::default());
+                    if header_peek.eat(Token::Semicolon).unwrap_or(false) {
+                        bail!(Error::new(
+                            span,
+                            "a `package` declaration is not allowed in a file with \
+                             a `component` definition; use `package ... { ... }` \
+                             blocks for inline dependencies instead",
+                        ));
+                    }
+                    preamble.push(AstItem::Package(PackageFile::parse_nested(
+                        tokens,
+                        preamble_docs,
+                        attributes,
+                    )?));
+                }
+                other => {
+                    return Err(
+                        err_expected(tokens, "`component`, `use`, or `package`", other).into(),
+                    );
+                }
+            }
+        }
+
+        // Now parse doc comments immediately before `component` and the
+        // keyword itself.
+        let docs = parse_docs(tokens)?;
+        let span = tokens.expect(Token::Component)?;
+
+        // Ensure no attributes or identifier follows `component`.
+        // `component` is always unnamed and ungated.
+        let items = World::parse_items(tokens)?;
+
+        // Ensure nothing follows the component definition.
+        if let Some((extra_span, extra_tok)) = tokens.clone().next()? {
+            bail!(Error::new(
+                extra_span,
+                format!(
+                    "unexpected {} after `component` definition; \
+                     a file may only contain a single `component` definition",
+                    extra_tok.describe()
+                ),
+            ));
+        }
+
+        Ok(ComponentFile {
+            docs,
+            span,
+            items,
+            preamble,
+        })
+    }
+
+    /// Visit all `UsePath` references in this component file so that foreign
+    /// dependencies can be collected by the resolver. This mirrors the logic
+    /// in `DeclList::for_each_path` for world items.
+    fn for_each_path<'b>(
+        &'b self,
+        f: &mut dyn FnMut(
+            Option<&'b Id<'a>>,
+            &'b [Attribute<'a>],
+            &'b UsePath<'a>,
+            Option<&'b [UseName<'a>]>,
+            WorldOrInterface,
+        ) -> Result<()>,
+    ) -> Result<()> {
+        // Visit preamble items (top-level `use` and nested `package` blocks).
+        for item in self.preamble.iter() {
+            match item {
+                AstItem::Use(u) => {
+                    f(
+                        None,
+                        &u.attributes,
+                        &u.item,
+                        None,
+                        WorldOrInterface::Unknown,
+                    )?;
+                }
+                AstItem::Package(pkg) => pkg.decl_list.for_each_path(f)?,
+                _ => {}
+            }
+        }
+
+        // Visit the component body items (same as world body items).
+        let mut imports = Vec::new();
+        let mut exports = Vec::new();
+        for item in self.items.iter() {
+            match item {
+                WorldItem::Use(u) => f(
+                    None,
+                    &u.attributes,
+                    &u.from,
+                    Some(&u.names),
+                    WorldOrInterface::Interface,
+                )?,
+                WorldItem::Include(i) => {
+                    f(None, &i.attributes, &i.from, None, WorldOrInterface::World)?
+                }
+                WorldItem::Type(_) => {}
+                WorldItem::Import(Import {
+                    kind, attributes, ..
+                }) => imports.push((kind, attributes)),
+                WorldItem::Export(Export {
+                    kind, attributes, ..
+                }) => exports.push((kind, attributes)),
+            }
+        }
+
+        let mut visit_kind = |kind: &'b ExternKind<'a>, attrs: &'b [Attribute<'a>]| match kind {
+            ExternKind::Interface(_, items) => {
+                for item in items {
+                    if let InterfaceItem::Use(u) = item {
+                        f(
+                            None,
+                            &u.attributes,
+                            &u.from,
+                            Some(&u.names),
+                            WorldOrInterface::Interface,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            ExternKind::Path(path) => f(None, attrs, path, None, WorldOrInterface::Interface),
+            ExternKind::Func(..) => Ok(()),
+        };
+
+        for (kind, attrs) in imports {
+            visit_kind(kind, attrs)?;
+        }
+        for (kind, attrs) in exports {
+            visit_kind(kind, attrs)?;
+        }
+        Ok(())
     }
 }
 
@@ -270,6 +492,12 @@ impl<'a> AstItem<'a> {
             Some((_span, Token::Package)) => {
                 PackageFile::parse_nested(tokens, docs, attributes).map(Self::Package)
             }
+            Some((span, Token::Component)) => Err(Error::new(
+                span,
+                "the `component` keyword can only appear at the top level of a \
+                 WIT file, not nested inside a package",
+            )
+            .into()),
             other => Err(err_expected(tokens, "`world`, `interface` or `use`", other).into()),
         }
     }
@@ -1776,8 +2004,8 @@ impl SourceMap {
             srcs.sort_by_key(|src| &src.path);
 
             // Parse each source file individually. A tokenizer is created here
-            // form settings and then `PackageFile` is used to parse the whole
-            // stream of tokens.
+            // from settings and then parsing dispatches between package files
+            // and component files.
             for src in srcs {
                 let mut tokens = Tokenizer::new(
                     // chop off the forcibly appended `\n` character when
@@ -1786,35 +2014,64 @@ impl SourceMap {
                     src.offset,
                 )
                 .with_context(|| format!("failed to tokenize path: {}", src.path))?;
-                let mut file = PackageFile::parse(&mut tokens)?;
+                let wit_file = WitFile::parse(&mut tokens)?;
 
-                // Filter out any nested packages and resolve them separately.
-                // Nested packages have only a single "file" so only one item
-                // is pushed into a `Resolver`. Note that a nested `Resolver`
-                // is used here, not the outer one.
-                //
-                // Note that filtering out `Package` items is required due to
-                // how the implementation of disallowing nested packages in
-                // nested packages currently works.
-                for item in mem::take(&mut file.decl_list.items) {
-                    match item {
-                        AstItem::Package(nested_pkg) => {
-                            let mut resolve = Resolver::default();
-                            resolve.push(nested_pkg).with_context(|| {
-                                format!("failed to handle nested package in: {}", src.path)
-                            })?;
+                match wit_file {
+                    WitFile::Package(mut file) => {
+                        // Filter out any nested packages and resolve them
+                        // separately. Nested packages have only a single
+                        // "file" so only one item is pushed into a `Resolver`.
+                        // Note that a nested `Resolver` is used here, not the
+                        // outer one.
+                        //
+                        // Note that filtering out `Package` items is required
+                        // due to how the implementation of disallowing nested
+                        // packages in nested packages currently works.
+                        for item in mem::take(&mut file.decl_list.items) {
+                            match item {
+                                AstItem::Package(nested_pkg) => {
+                                    let mut resolve = Resolver::default();
+                                    resolve.push(nested_pkg).with_context(|| {
+                                        format!("failed to handle nested package in: {}", src.path)
+                                    })?;
 
-                            nested.push(resolve.resolve()?);
+                                    nested.push(resolve.resolve()?);
+                                }
+                                other => file.decl_list.items.push(other),
+                            }
                         }
-                        other => file.decl_list.items.push(other),
+
+                        // With nested packages handled push this file into
+                        // the resolver.
+                        resolver.push(file).with_context(|| {
+                            format!("failed to start resolving path: {}", src.path)
+                        })?;
+                    }
+
+                    WitFile::Component(mut component) => {
+                        // A component file produces an unnamed world. It is
+                        // mutually exclusive with package files in the same
+                        // source map.
+                        //
+                        // Process any nested packages from the preamble first.
+                        for item in mem::take(&mut component.preamble) {
+                            match item {
+                                AstItem::Package(nested_pkg) => {
+                                    let mut resolve = Resolver::default();
+                                    resolve.push(nested_pkg).with_context(|| {
+                                        format!("failed to handle nested package in: {}", src.path)
+                                    })?;
+                                    nested.push(resolve.resolve()?);
+                                }
+                                other => component.preamble.push(other),
+                            }
+                        }
+
+                        resolver.push_component(component).with_context(|| {
+                            format!("failed to start resolving path: {}", src.path)
+                        })?;
                     }
                 }
-
-                // With nested packages handled push this file into the
-                // resolver.
-                resolver
-                    .push(file)
-                    .with_context(|| format!("failed to start resolving path: {}", src.path))?;
             }
             Ok(resolver.resolve()?)
         })?;

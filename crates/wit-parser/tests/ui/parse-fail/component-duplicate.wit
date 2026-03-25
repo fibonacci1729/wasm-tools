@@ -1,0 +1,7 @@
+component {
+  export run: func();
+}
+
+component {
+  export run2: func();
+}

@@ -151,6 +151,7 @@ pub enum Token {
     Export,
     World,
     Package,
+    Component,
     Constructor,
     Async,
 
@@ -361,6 +362,7 @@ impl<'a> Tokenizer<'a> {
                     "import" => Import,
                     "export" => Export,
                     "package" => Package,
+                    "component" => Component,
                     "constructor" => Constructor,
                     "include" => Include,
                     "with" => With,
@@ -617,6 +619,7 @@ impl Token {
             Export => "keyword `export`",
             World => "keyword `world`",
             Package => "keyword `package`",
+            Component => "keyword `component`",
             Constructor => "keyword `constructor`",
             Integer => "an integer",
             Include => "keyword `include`",

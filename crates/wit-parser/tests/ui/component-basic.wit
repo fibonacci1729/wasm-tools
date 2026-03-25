@@ -1,0 +1,3 @@
+component {
+  export frob: func(input: string) -> string;
+}

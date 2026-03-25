@@ -1,0 +1,46 @@
+{
+  "worlds": [
+    {
+      "name": "",
+      "imports": {
+        "log": {
+          "function": {
+            "name": "log",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "msg",
+                "type": "string"
+              }
+            ]
+          }
+        }
+      },
+      "exports": {
+        "run": {
+          "function": {
+            "name": "run",
+            "kind": "freestanding",
+            "params": [],
+            "result": "u32"
+          }
+        }
+      },
+      "package": 0,
+      "docs": {
+        "contents": "My component does cool stuff."
+      }
+    }
+  ],
+  "interfaces": [],
+  "types": [],
+  "packages": [
+    {
+      "name": ":",
+      "interfaces": {},
+      "worlds": {
+        "": 0
+      }
+    }
+  ]
+}

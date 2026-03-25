@@ -1,0 +1,9 @@
+package foo:bar;
+
+world my-world {
+  export run: func();
+}
+
+component {
+  export run2: func();
+}

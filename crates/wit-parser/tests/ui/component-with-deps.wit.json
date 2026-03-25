@@ -1,0 +1,128 @@
+{
+  "worlds": [
+    {
+      "name": "",
+      "imports": {
+        "interface-0": {
+          "interface": {
+            "id": 0
+          }
+        },
+        "request": {
+          "type": 2
+        },
+        "response": {
+          "type": 3
+        },
+        "handle": {
+          "function": {
+            "name": "handle",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "req",
+                "type": 2
+              }
+            ],
+            "result": 3
+          }
+        }
+      },
+      "exports": {
+        "serve": {
+          "function": {
+            "name": "serve",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "req",
+                "type": 2
+              }
+            ],
+            "result": 3
+          }
+        }
+      },
+      "package": 1
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "types",
+      "types": {
+        "request": 0,
+        "response": 1
+      },
+      "functions": {},
+      "package": 0
+    }
+  ],
+  "types": [
+    {
+      "name": "request",
+      "kind": {
+        "record": {
+          "fields": [
+            {
+              "name": "url",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "owner": {
+        "interface": 0
+      }
+    },
+    {
+      "name": "response",
+      "kind": {
+        "record": {
+          "fields": [
+            {
+              "name": "status",
+              "type": "u16"
+            }
+          ]
+        }
+      },
+      "owner": {
+        "interface": 0
+      }
+    },
+    {
+      "name": "request",
+      "kind": {
+        "type": 0
+      },
+      "owner": {
+        "world": 0
+      }
+    },
+    {
+      "name": "response",
+      "kind": {
+        "type": 1
+      },
+      "owner": {
+        "world": 0
+      }
+    }
+  ],
+  "packages": [
+    {
+      "name": "my:deps",
+      "interfaces": {
+        "types": 0
+      },
+      "worlds": {}
+    },
+    {
+      "name": ":",
+      "interfaces": {},
+      "worlds": {
+        "": 0
+      }
+    }
+  ]
+}

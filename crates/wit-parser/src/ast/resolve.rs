@@ -18,6 +18,10 @@ pub struct Resolver<'a> {
     /// All non-`package` WIT decls are going to be resolved together.
     decl_lists: Vec<ast::DeclList<'a>>,
 
+    /// When set, this resolver is for a `component { ... }` file, which
+    /// produces an unnamed world with no package name.
+    component: Option<ast::ComponentFile<'a>>,
+
     // Arenas that get plumbed to the final `UnresolvedPackage`
     types: Arena<TypeDef>,
     interfaces: Arena<Interface>,
@@ -155,7 +159,34 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    /// Push a `component { ... }` file into this resolver.
+    ///
+    /// A component file is mutually exclusive with package files and other
+    /// component files — only one is allowed per resolver.
+    pub(super) fn push_component(&mut self, component: ast::ComponentFile<'a>) -> Result<()> {
+        if self.component.is_some() {
+            bail!(Error::new(
+                component.span,
+                "only one `component` definition is allowed",
+            ))
+        }
+        if self.package_name.is_some() || !self.decl_lists.is_empty() {
+            bail!(Error::new(
+                component.span,
+                "`component` cannot be mixed with `package` declarations",
+            ))
+        }
+        self.component = Some(component);
+        Ok(())
+    }
+
     pub(crate) fn resolve(&mut self) -> Result<UnresolvedPackage> {
+        // If a `component { ... }` was pushed, resolve it instead of the
+        // normal package path.
+        if self.component.is_some() {
+            return self.resolve_as_component();
+        }
+
         // At least one of the WIT files must have a `package` annotation.
         let (name, package_name_span) = match &self.package_name {
             Some(name) => name.clone(),
@@ -239,6 +270,325 @@ impl<'a> Resolver<'a> {
             foreign_dep_spans: mem::take(&mut self.foreign_dep_spans),
             required_resource_types: mem::take(&mut self.required_resource_types),
         })
+    }
+
+    /// Resolve a `component { ... }` file into an `UnresolvedPackage` with a
+    /// single unnamed world and a synthetic package name.
+    fn resolve_as_component(&mut self) -> Result<UnresolvedPackage> {
+        let component = self.component.take().unwrap();
+
+        // Populate foreign deps from the component's paths.
+        self.populate_component_foreign_deps(&component);
+
+        // Populate foreign types from the component.
+        self.populate_component_foreign_types(&component)?;
+
+        // Allocate a world for the component.
+        let world_id = self.alloc_world(component.span);
+
+        // Set up a single ast_items entry (effectively an empty namespace
+        // since a component defines no named interfaces/worlds).
+        let mut ast_ns = IndexMap::default();
+
+        // Process top-level `use` items from the preamble to bring foreign
+        // items into scope for the component body.
+        for item in component.preamble.iter() {
+            if let ast::AstItem::Use(u) = item {
+                let name = u.as_.as_ref().unwrap_or(u.item.name());
+                let item = match &u.item {
+                    ast::UsePath::Id(id) => {
+                        bail!(Error::new(
+                            id.span,
+                            format!(
+                                "cannot reference `{}` — a `component` file has \
+                                 no named interfaces or worlds in scope",
+                                id.name
+                            ),
+                        ))
+                    }
+                    ast::UsePath::Package { id, name } => {
+                        self.foreign_deps[&id.package_name()][name.name].0
+                    }
+                };
+                if ast_ns.insert(name.name, item).is_some() {
+                    bail!(Error::new(
+                        name.span,
+                        format!("duplicate name `{}` in this file", name.name),
+                    ));
+                }
+            }
+        }
+        self.ast_items.push(ast_ns);
+        self.cur_ast_index = 0;
+
+        // Resolve the world items as if we were resolving a named world.
+        let docs = self.docs(&component.docs);
+        self.worlds[world_id].docs = docs;
+
+        self.resolve_types(
+            TypeOwner::World(world_id),
+            component.items.iter().filter_map(|i| match i {
+                ast::WorldItem::Use(u) => Some(TypeItem::Use(u)),
+                ast::WorldItem::Type(t) => Some(TypeItem::Def(t)),
+                ast::WorldItem::Import(_) | ast::WorldItem::Export(_) => None,
+                ast::WorldItem::Include(_) => None,
+            }),
+        )?;
+
+        // Resolve include items.
+        for item in component.items.iter() {
+            if let ast::WorldItem::Include(i) = item {
+                self.resolve_include(world_id, i)?;
+            }
+        }
+
+        for (name, (item, span)) in self.type_lookup.iter() {
+            if let TypeOrItem::Type(id) = *item {
+                let prev = self.worlds[world_id].imports.insert(
+                    WorldKey::Name(name.to_string()),
+                    WorldItem::Type { id, span: *span },
+                );
+                if prev.is_some() {
+                    bail!(Error::new(
+                        *span,
+                        format!("import `{name}` conflicts with prior import of same name"),
+                    ))
+                }
+            }
+        }
+
+        let mut imported_interfaces = HashSet::new();
+        let mut exported_interfaces = HashSet::new();
+        for item in component.items.iter() {
+            let (docs, attrs, kind, desc, interfaces) = match item {
+                ast::WorldItem::Import(import) => (
+                    &import.docs,
+                    &import.attributes,
+                    &import.kind,
+                    "import",
+                    &mut imported_interfaces,
+                ),
+                ast::WorldItem::Export(export) => (
+                    &export.docs,
+                    &export.attributes,
+                    &export.kind,
+                    "export",
+                    &mut exported_interfaces,
+                ),
+                ast::WorldItem::Type(ast::TypeDef {
+                    name,
+                    ty: ast::Type::Resource(r),
+                    ..
+                }) => {
+                    for func in r.funcs.iter() {
+                        let func = self.resolve_resource_func(func, name)?;
+                        let prev = self.worlds[world_id]
+                            .imports
+                            .insert(WorldKey::Name(func.name.clone()), WorldItem::Function(func));
+                        assert!(prev.is_none());
+                    }
+                    continue;
+                }
+                ast::WorldItem::Use(_) | ast::WorldItem::Type(_) | ast::WorldItem::Include(_) => {
+                    continue;
+                }
+            };
+
+            let world_item = self.resolve_world_item(docs, attrs, kind)?;
+            let key = match kind {
+                ast::ExternKind::Interface(name, _) => WorldKey::Name(name.name.to_string()),
+                ast::ExternKind::Func(..) => {
+                    let func = match &world_item {
+                        WorldItem::Function(f) => f,
+                        _ => unreachable!(),
+                    };
+                    WorldKey::Name(func.name.clone())
+                }
+                ast::ExternKind::Path(path) => {
+                    let (item, name, span) = self.resolve_ast_item_path(path)?;
+                    let id = self.extract_iface_from_item(&item, &name, span)?;
+                    WorldKey::Interface(id)
+                }
+            };
+            if let WorldItem::Interface { id, .. } = world_item {
+                if !interfaces.insert(id) {
+                    bail!(Error::new(
+                        kind.span(),
+                        format!("interface cannot be {desc}ed more than once"),
+                    ))
+                }
+            }
+            let dst = if desc == "import" {
+                &mut self.worlds[world_id].imports
+            } else {
+                &mut self.worlds[world_id].exports
+            };
+            let prev = dst.insert(key.clone(), world_item);
+            if let Some(prev) = prev {
+                let prev = match prev {
+                    WorldItem::Interface { .. } => "interface",
+                    WorldItem::Function(..) => "func",
+                    WorldItem::Type { .. } => "type",
+                };
+                let name = match key {
+                    WorldKey::Name(name) => name,
+                    WorldKey::Interface(_) => unreachable!(),
+                };
+                bail!(Error::new(
+                    kind.span(),
+                    format!(
+                        "{desc} `{name}` conflicts with prior {desc} of \
+                         same name ({prev})",
+                    ),
+                ))
+            }
+        }
+
+        // Construct a synthetic package name for the component.
+        let name = PackageName {
+            namespace: String::new(),
+            name: String::new(),
+            version: None,
+        };
+
+        Ok(UnresolvedPackage {
+            package_name_span: Span::default(),
+            name,
+            docs: mem::take(&mut self.package_docs),
+            worlds: mem::take(&mut self.worlds),
+            types: mem::take(&mut self.types),
+            interfaces: mem::take(&mut self.interfaces),
+            foreign_deps: self
+                .foreign_deps
+                .iter()
+                .map(|(name, deps)| {
+                    (
+                        name.clone(),
+                        deps.iter()
+                            .map(|(name, (id, stabilities))| {
+                                (name.to_string(), (*id, stabilities.clone()))
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+            unknown_type_spans: mem::take(&mut self.unknown_type_spans),
+            foreign_dep_spans: mem::take(&mut self.foreign_dep_spans),
+            required_resource_types: mem::take(&mut self.required_resource_types),
+        })
+    }
+
+    /// Populate foreign deps from a component file's use-paths.
+    fn populate_component_foreign_deps(&mut self, component: &ast::ComponentFile<'a>) {
+        let mut foreign_deps = mem::take(&mut self.foreign_deps);
+        let mut foreign_interfaces = mem::take(&mut self.foreign_interfaces);
+        let mut foreign_worlds = mem::take(&mut self.foreign_worlds);
+
+        component
+            .for_each_path(&mut |_, attrs, path, _names, world_or_iface| {
+                let (id, name) = match path {
+                    ast::UsePath::Package { id, name } => (id, name),
+                    _ => return Ok(()),
+                };
+
+                let stability = self.stability(attrs)?;
+
+                let deps = foreign_deps.entry(id.package_name()).or_insert_with(|| {
+                    self.foreign_dep_spans.push(id.span);
+                    IndexMap::default()
+                });
+                let (id, stabilities) = deps.entry(name.name).or_insert_with(|| {
+                    let id = match world_or_iface {
+                        WorldOrInterface::World => AstItem::World(self.alloc_world(name.span)),
+                        WorldOrInterface::Interface | WorldOrInterface::Unknown => {
+                            AstItem::Interface(self.alloc_interface(name.span))
+                        }
+                    };
+                    (id, Vec::new())
+                });
+
+                stabilities.push(stability);
+
+                let _ = match *id {
+                    AstItem::Interface(id) => foreign_interfaces.insert(id),
+                    AstItem::World(id) => foreign_worlds.insert(id),
+                };
+
+                Ok(())
+            })
+            .unwrap();
+
+        self.foreign_deps = foreign_deps;
+        self.foreign_interfaces = foreign_interfaces;
+        self.foreign_worlds = foreign_worlds;
+    }
+
+    /// Populate foreign types from a component file's use-paths.
+    fn populate_component_foreign_types(
+        &mut self,
+        component: &ast::ComponentFile<'a>,
+    ) -> Result<()> {
+        self.cur_ast_index = 0;
+        // Ensure there's at least one ast_items entry for resolve_ast_item_path
+        // to work with.
+        if self.ast_items.is_empty() {
+            self.ast_items.push(IndexMap::default());
+        }
+
+        // Process preamble use items to populate the ast_items scope.
+        for item in component.preamble.iter() {
+            if let ast::AstItem::Use(u) = item {
+                let name = u.as_.as_ref().unwrap_or(u.item.name());
+                let item = match &u.item {
+                    ast::UsePath::Id(_) => continue,
+                    ast::UsePath::Package { id, name } => {
+                        self.foreign_deps[&id.package_name()][name.name].0
+                    }
+                };
+                self.ast_items[0].insert(name.name, item);
+            }
+        }
+
+        component.for_each_path(&mut |_, attrs, path, names, _| {
+            let names = match names {
+                Some(names) => names,
+                None => return Ok(()),
+            };
+            let stability = self.stability(attrs)?;
+            let (item, name, span) = self.resolve_ast_item_path(path)?;
+            let iface = self.extract_iface_from_item(&item, &name, span)?;
+            if !self.foreign_interfaces.contains(&iface) {
+                return Ok(());
+            }
+
+            let lookup = &mut self.interface_types[iface.index()];
+            for name in names {
+                if lookup.contains_key(name.name.name) {
+                    continue;
+                }
+                let id = self.types.alloc(TypeDef {
+                    docs: Docs::default(),
+                    stability: stability.clone(),
+                    kind: TypeDefKind::Unknown,
+                    name: Some(name.name.name.to_string()),
+                    owner: TypeOwner::Interface(iface),
+                    span: name.name.span,
+                });
+                self.unknown_type_spans.push(name.name.span);
+                lookup.insert(name.name.name, (TypeOrItem::Type(id), name.name.span));
+                self.interfaces[iface]
+                    .types
+                    .insert(name.name.name.to_string(), id);
+            }
+
+            Ok(())
+        })?;
+
+        // Clear out the temporary ast_items and let resolve_as_component
+        // repopulate them.
+        self.ast_items.clear();
+
+        Ok(())
     }
 
     /// Registers all foreign dependencies made within the ASTs provided.

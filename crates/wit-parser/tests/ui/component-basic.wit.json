@@ -1,0 +1,35 @@
+{
+  "worlds": [
+    {
+      "name": "",
+      "imports": {},
+      "exports": {
+        "frob": {
+          "function": {
+            "name": "frob",
+            "kind": "freestanding",
+            "params": [
+              {
+                "name": "input",
+                "type": "string"
+              }
+            ],
+            "result": "string"
+          }
+        }
+      },
+      "package": 0
+    }
+  ],
+  "interfaces": [],
+  "types": [],
+  "packages": [
+    {
+      "name": ":",
+      "interfaces": {},
+      "worlds": {
+        "": 0
+      }
+    }
+  ]
+}

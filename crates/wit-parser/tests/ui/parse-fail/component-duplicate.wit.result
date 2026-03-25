@@ -1,0 +1,5 @@
+unexpected keyword `component` after `component` definition; a file may only contain a single `component` definition
+     --> tests/ui/parse-fail/component-duplicate.wit:5:1
+      |
+    5 | component {
+      | ^--------

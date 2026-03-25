@@ -1,0 +1,5 @@
+a `package` declaration is not allowed in a file with a `component` definition; use `package ... { ... }` blocks for inline dependencies instead
+     --> tests/ui/parse-fail/component-with-package.wit:1:1
+      |
+    1 | package foo:bar;
+      | ^------

@@ -1,0 +1,16 @@
+package my:deps {
+  interface types {
+    record request {
+      url: string,
+    }
+    record response {
+      status: u16,
+    }
+  }
+}
+
+component {
+  use my:deps/types.{request, response};
+  import handle: func(req: request) -> response;
+  export serve: func(req: request) -> response;
+}
